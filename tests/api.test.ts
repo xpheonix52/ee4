@@ -316,7 +316,73 @@ test('analytics, quick replies and team management', async () => {
   assert.equal((await app.req('DELETE', `/users/${me.id}`)).status, 400)
 })
 
+test('safety: uploaded files, key placement, stale backlog, login throttling', async () => {
+  const chat = await chatByPhone('15550001')
+  const fd = new FormData()
+  fd.append('file', new Blob(['<script>alert(1)</script>'], { type: 'text/html' }), 'evil.html')
+  const up = await fetch(`${app.url}/api/v1/chats/${chat.id}/messages`, { method: 'POST', headers: { cookie: app.cookie }, body: fd })
+  const sent = await up.json()
+  assert.equal(sent.type, 'document')
+  const media = await fetch(app.url + sent.media_url, { headers: { cookie: app.cookie } })
+  assert.equal(media.headers.get('content-type'), 'application/octet-stream', 'HTML from a chat must never render on our origin')
+  assert.match(media.headers.get('content-disposition')!, /^attachment/); assert.equal(media.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal((await fetch(app.url + sent.media_url)).status, 401)
+
+  const png = new FormData()
+  png.append('file', new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }), 'pic.png'); png.append('text', 'see photo')
+  const img = await (await fetch(`${app.url}/api/v1/chats/${chat.id}/messages`, { method: 'POST', headers: { cookie: app.cookie }, body: png })).json()
+  assert.equal(img.type, 'image'); assert.equal(img.text, 'see photo')
+  assert.equal((await fetch(app.url + img.media_url, { headers: { cookie: app.cookie } })).headers.get('content-type'), 'image/png')
+
+  // API keys are accepted in the URL only on the MCP endpoint, never on the REST API.
+  assert.equal((await fetch(`${app.url}/api/v1/chats?key=${apiKey}`)).status, 401)
+
+  // A message that arrives hours late (after downtime) is stored and counted, but not auto-answered.
+  await app.ok('POST', '/automations', { name: 'Echo', trigger: { type: 'message.received' }, conditions: [{ field: 'message.text', op: 'starts_with', value: 'echo' }], actions: [{ type: 'send_message', text: 'echoed' }] })
+  await app.ok('POST', `/numbers/${num.id}/simulate`, { from: '15550050', name: 'Old', text: 'echo from yesterday', timestamp: Date.now() - 3600_000 })
+  const old = await until(() => chatByPhone('15550050'), 'backlog chat')
+  await sleep(300)
+  assert.equal(old.unread, 1); assert.equal((await outbound(old.id)).length, 0)
+  await simulate('echo now', '15550050', 'Old')
+  await until(async () => (await outbound(old.id)).length === 1, 'fresh message is answered')
+
+  for (let i = 0; i < 10; i++) assert.equal((await app.req('POST', '/auth/login', { email: 'agent@test.dev', password: 'nope' }, { anon: true })).status, 401)
+  assert.equal((await app.req('POST', '/auth/login', { email: 'agent@test.dev', password: 'password123' }, { anon: true })).status, 429)
+})
+
+test('robustness: cooldown bursts, bot loops, broken rules, renamed chats', async () => {
+  // Three messages in the same instant must still produce exactly one cooldown-limited reply.
+  const burst = await app.ok('POST', '/automations', { name: 'Burst', trigger: { type: 'message.received' }, cooldown_minutes: 30, conditions: [{ field: 'message.text', op: 'starts_with', value: 'burst' }], actions: [{ type: 'send_message', text: 'one reply only' }] })
+  await Promise.all([1, 2, 3].map((i) => simulate(`burst ${i}`, '15550060', 'Pat')))
+  await sleep(600)
+  assert.equal((await app.ok('GET', `/automations/${burst.id}/runs`)).length, 1)
+
+  // A chatty bot on the other side cannot make us reply forever.
+  for (let i = 0; i < 12; i++) await simulate('ping', '15550061', 'Bot')
+  const bot = await until(() => chatByPhone('15550061'), 'chat')
+  await sleep(1200)
+  assert.equal((await outbound(bot.id)).filter((m: any) => m.text === 'pong').length, 8, 'auto-replies stop after 8 in a row')
+
+  // Malformed rules are rejected up front, so they can never take the other automations down.
+  assert.equal((await app.req('POST', '/automations', { name: 'bad', trigger: { type: 'message.received' }, conditions: [null], actions: [{ type: 'wait' }] })).status, 400)
+  assert.equal((await app.req('POST', '/automations', { name: 'bad', trigger: { type: 'message.received' }, actions: [{}] })).status, 400)
+
+  // A name typed by the team survives the customer's next message.
+  const pat = await chatByPhone('15550060')
+  await app.ok('PATCH', `/chats/${pat.id}`, { name: 'Pat (VIP, Acme)' })
+  await simulate('hello again', '15550060', 'Pat')
+  await until(async () => (await messages(pat.id)).at(-1).text === 'hello again', 'message')
+  assert.equal((await app.ok('GET', `/chats/${pat.id}`)).name, 'Pat (VIP, Acme)')
+})
+
 test('data survives a restart', async () => {
+  // A slow broadcast must not hold up a teammate's reply, and whatever is unsent at shutdown is flagged, not lost silently.
+  const [x, y] = [await chatByPhone('15550020'), await chatByPhone('15550030')]
+  await app.ok('PUT', '/settings', { sending: { broadcastMinDelayMs: 60000, broadcastMaxDelayMs: 60000, broadcastDailyLimit: 1000 } })
+  await app.ok('POST', '/scheduled', { chat_ids: [x.id, y.id], text: 'slow broadcast' })
+  await until(async () => (await outbound(x.id)).some((m: any) => m.text === 'slow broadcast'), 'broadcast queued')
+  const quick = await app.ok('POST', `/chats/${x.id}/messages`, { text: 'human reply during broadcast' })
+  await until(async () => (await messages(x.id)).find((m: any) => m.id === quick.id)?.status === 'delivered', 'human reply not blocked by broadcast', 2000)
   const before = (await app.ok('GET', '/chats')).length
   await app.stop(); await app.start()
   assert.equal((await app.ok('GET', '/chats')).length, before)
@@ -325,4 +391,6 @@ test('data survives a restart', async () => {
   const chat = await chatByPhone('15550001')
   await until(async () => (await messages(chat.id)).at(-1).text === 'still there?', 'message after restart')
   assert.equal((await app.req('GET', '/chats', undefined, { key: apiKey })).status, 200)
+  const stranded = (await outbound(x.id)).find((m: any) => m.text === 'slow broadcast')
+  assert.equal(stranded.status, 'failed'); assert.match(stranded.error, /Interrupted by a server restart/)
 })

@@ -11,7 +11,8 @@ export type Incoming = {
 }
 export type TransportHandlers = {
   onStatus: (status: string, extra?: { qr?: string | null; phone?: string }) => void
-  onMessage: (m: Incoming) => void
+  /** `history` marks messages backfilled when a device is linked: stored quietly, never answered. */
+  onMessage: (m: Incoming, history?: boolean) => void
   onReceipt: (waId: string, status: 'sent' | 'delivered' | 'read') => void
 }
 export interface Transport {
@@ -23,6 +24,11 @@ export interface Transport {
   resolveJid(phone: string): Promise<string>
   pairingCode(phone: string): Promise<string>
 }
+
+/** WhatsApp timestamps arrive as a number or a protobuf Long. */
+const seconds = (t: any) => (t && typeof t === 'object' ? (typeof t.toNumber === 'function' ? t.toNumber() : Number(t.low) || 0) : Number(t) || 0)
+
+const MAX_MEDIA_BYTES = 30 * 1024 * 1024
 
 /** A simulated number: no phone required. Used for trying the product and by the QA suite. */
 export class SandboxTransport implements Transport {
@@ -40,14 +46,14 @@ export class SandboxTransport implements Transport {
   async resolveJid(phone: string) { return `${phone.replace(/\D/g, '')}@s.whatsapp.net` }
   async pairingCode(): Promise<string> { throw new Error('Sandbox numbers do not need pairing') }
   /** Inject a message as if a customer sent it. */
-  simulate(m: { from: string; name?: string; text: string; group?: string }) {
+  simulate(m: { from: string; name?: string; text: string; group?: string; timestamp?: number }) {
     const digits = m.from.replace(/\D/g, '')
     const senderJid = `${digits}@s.whatsapp.net`
     const groupJid = m.group ? `${m.group.toLowerCase().replace(/[^a-z0-9]+/g, '-')}@g.us` : undefined
     this.h.onMessage({
       waId: `sbxin_${token(8)}`, jid: groupJid || senderJid, chatType: groupJid ? 'group' : 'dm',
       chatName: m.group || m.name, phone: groupJid ? undefined : digits, senderJid, senderName: m.name || digits,
-      fromMe: false, type: 'text', text: m.text, timestamp: Date.now(),
+      fromMe: false, type: 'text', text: m.text, timestamp: m.timestamp || Date.now(),
     })
   }
 }
@@ -57,6 +63,8 @@ export class BaileysTransport implements Transport {
   private sock: any
   private stopped = false
   private retries = 0
+  private generation = 0
+  private qrCycles = 0
   private groupNames = new Map<string, string>()
   private authDir: string
   constructor(private numberId: string, private h: TransportHandlers) {
@@ -65,6 +73,8 @@ export class BaileysTransport implements Transport {
 
   async start() {
     this.stopped = false
+    // Only the most recent start() may open a socket; an older one that was still awaiting must bow out.
+    const gen = ++this.generation
     const b = await import('baileys')
     const { state, saveCreds } = await b.useMultiFileAuthState(this.authDir)
     const logger = pino({ level: 'silent' })
@@ -73,11 +83,12 @@ export class BaileysTransport implements Transport {
     if (proxy) agent = new (await import('https-proxy-agent')).HttpsProxyAgent(proxy)
     let version: any
     try { version = (await b.fetchLatestBaileysVersion()).version } catch { /* use bundled default */ }
+    if (this.stopped || gen !== this.generation) return
 
     const sock = (this.sock = b.makeWASocket({
       auth: { creds: state.creds, keys: b.makeCacheableSignalKeyStore(state.keys, logger as any) },
       logger: logger as any, browser: b.Browsers.macOS('Desktop'), markOnlineOnConnect: false,
-      syncFullHistory: false, agent, ...(version ? { version } : {}),
+      syncFullHistory: false, emitOwnEvents: false, agent, ...(version ? { version } : {}),
     }))
     this.h.onStatus('connecting')
     sock.ev.on('creds.update', saveCreds)
@@ -86,6 +97,7 @@ export class BaileysTransport implements Transport {
       if (u.qr) this.h.onStatus('qr', { qr: await QRCode.toDataURL(u.qr, { margin: 1, width: 320 }) })
       if (u.connection === 'open') {
         this.retries = 0
+        this.qrCycles = 0
         this.h.onStatus('connected', { phone: String(sock.user?.id || '').split(/[:@]/)[0], qr: null })
       }
       if (u.connection === 'close') {
@@ -96,16 +108,32 @@ export class BaileysTransport implements Transport {
           this.h.onStatus('disconnected', { qr: null })
           return
         }
+        // Fatal: another session took over (440), the number is banned (403) or the device link is invalid (411).
+        // Reconnecting would only fight WhatsApp, so stop and show it as disconnected.
+        const fatal = [b.DisconnectReason.connectionReplaced, b.DisconnectReason.forbidden, b.DisconnectReason.multideviceMismatch].includes(code)
+        // An unscanned QR expires after a few minutes; do not keep requesting new ones all night.
+        const qrExpired = !sock.authState?.creds?.registered && !sock.user && code === b.DisconnectReason.timedOut && ++this.qrCycles >= 3
+        if (fatal || qrExpired) { this.qrCycles = 0; this.h.onStatus('disconnected', { qr: null }); return }
         this.h.onStatus('connecting')
-        const delay = Math.min(30000, 1000 * 2 ** this.retries++)
-        setTimeout(() => { if (!this.stopped) this.start().catch(() => {}) }, delay)
+        this.reconnectLater()
       }
     })
 
     sock.ev.on('messages.upsert', async ({ messages, type }: any) => {
-      if (type !== 'notify') return
+      // 'notify' is live traffic; 'append' is what WhatsApp queued while we were offline.
+      if (type !== 'notify' && type !== 'append') return
       for (const m of messages) {
         try { await this.handle(b, sock, m) } catch (e) { console.error('[wa] failed to process message', e) }
+      }
+    })
+
+    // Recent conversations WhatsApp sends right after linking, so the inbox is not empty on day one.
+    sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }: any) => {
+      const names = new Map<string, string>()
+      for (const c of contacts || []) if (c.id && (c.name || c.notify)) names.set(c.id, c.name || c.notify)
+      for (const c of chats || []) if (c.id && c.name) names.set(c.id, c.name)
+      for (const m of messages || []) {
+        try { await this.handle(b, sock, m, names) } catch { /* skip anything unreadable in old history */ }
       }
     })
 
@@ -118,8 +146,20 @@ export class BaileysTransport implements Transport {
     })
   }
 
-  private async handle(b: any, sock: any, m: any) {
-    const jid: string | undefined = m.key?.remoteJid
+  private reconnectLater() {
+    const delay = Math.min(30000, 1000 * 2 ** this.retries++)
+    setTimeout(() => {
+      if (this.stopped) return
+      this.start().catch((e) => { console.error(`[wa] reconnect failed for ${this.numberId}`, e); this.reconnectLater() })
+    }, delay)
+  }
+
+  private async handle(b: any, sock: any, m: any, historyNames?: Map<string, string>) {
+    const rawJid: string | undefined = m.key?.remoteJid
+    // WhatsApp addresses many contacts by an opaque "LID". Key the chat on the phone-number JID whenever
+    // it is known, so a reply lands in the same chat we opened by phone number.
+    const alt: string | undefined = m.key?.remoteJidAlt
+    const jid = rawJid?.endsWith('@lid') && alt?.endsWith('@s.whatsapp.net') ? alt : rawJid
     if (!jid || !m.message || jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast')) return
     const content = b.normalizeMessageContent(m.message)
     const kind = b.getContentType(content)
@@ -135,28 +175,30 @@ export class BaileysTransport implements Transport {
     const text: string = typeof c === 'string' ? c : c?.text || c?.caption || ''
 
     let media: Incoming['media']
-    if (['image', 'video', 'audio', 'document', 'sticker'].includes(type)) {
-      try {
+    if (!historyNames && ['image', 'video', 'audio', 'document', 'sticker'].includes(type)) {
+      // Check the declared size first: buffering a multi-gigabyte file would take the server down.
+      if (seconds(c?.fileLength) <= MAX_MEDIA_BYTES) try {
         const buffer = (await b.downloadMediaMessage(m, 'buffer', {})) as Buffer
-        if (buffer.length <= 30 * 1024 * 1024) media = { buffer, mime: c?.mimetype || 'application/octet-stream', name: c?.fileName }
+        if (buffer.length <= MAX_MEDIA_BYTES) media = { buffer, mime: c?.mimetype || 'application/octet-stream', name: c?.fileName }
       } catch { /* media expired or unreachable: keep the message without the file */ }
     }
 
     let chatName: string | undefined = m.pushName
-    if (isGroup) {
+    if (historyNames) chatName = historyNames.get(jid) || (m.key.fromMe ? undefined : m.pushName) || (isGroup ? 'Group' : undefined)
+    else if (isGroup) {
       if (!this.groupNames.has(jid)) {
         try { this.groupNames.set(jid, (await sock.groupMetadata(jid)).subject) } catch { this.groupNames.set(jid, 'Group') }
       }
       chatName = this.groupNames.get(jid)
     }
-    const pn = [jid, m.key.remoteJidAlt].find((j: string | undefined) => j?.endsWith('@s.whatsapp.net'))
+    const pn = [jid, alt].find((j: string | undefined) => j?.endsWith('@s.whatsapp.net'))
     this.h.onMessage({
       waId: m.key.id, jid, chatType: isGroup ? 'group' : 'dm', chatName: m.key.fromMe && !isGroup ? undefined : chatName,
       phone: isGroup ? undefined : pn?.split('@')[0],
       senderJid: isGroup ? m.key.participant : jid, senderName: m.pushName, fromMe: !!m.key.fromMe,
       type, text: text || (type === 'other' ? '[unsupported message]' : ''), media,
-      timestamp: Number(m.messageTimestamp || 0) * 1000 || Date.now(),
-    })
+      timestamp: seconds(m.messageTimestamp) * 1000 || Date.now(),
+    }, !!historyNames)
   }
 
   private ready() {

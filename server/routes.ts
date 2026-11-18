@@ -20,9 +20,9 @@ const str = (v: unknown, name: string) => (typeof v === 'string' && v.trim() ? v
 const publicUser = (u: any) => u && { id: u.id, name: u.name, email: u.email, role: u.role, created_at: u.created_at }
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } })
 
-export function resolveActor(req: Request): Actor | null {
+export function resolveActor(req: Request, allowQueryKey = false): Actor | null {
   const header = req.headers.authorization || ''
-  const key = header.startsWith('Bearer ') ? header.slice(7).trim() : typeof req.query.key === 'string' ? req.query.key : ''
+  const key = header.startsWith('Bearer ') ? header.slice(7).trim() : allowQueryKey && typeof req.query.key === 'string' ? req.query.key : ''
   if (key) {
     const row = db.prepare('SELECT * FROM api_keys WHERE key_hash = ?').get(sha256(key)) as any
     if (!row) return null
@@ -68,9 +68,20 @@ api.post('/setup', (req, res) => {
   startSession(res, userId)
   res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(userId)) })
 })
+const failures = new Map<string, { n: number; until: number }>()
 api.post('/auth/login', (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE email = ?').get(String(req.body.email || '').toLowerCase().trim()) as any
-  if (!u || !verifyPassword(String(req.body.password || ''), u.password_hash)) throw new HttpError(401, 'Wrong email or password')
+  const email = String(req.body.email || '').toLowerCase().trim()
+  const who = `${req.ip}|${email}`
+  const f = failures.get(who)
+  if (f && f.n >= 10 && f.until > now()) throw new HttpError(429, 'Too many attempts. Try again in a few minutes.')
+  const u = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any
+  if (!u || !verifyPassword(String(req.body.password || ''), u.password_hash)) {
+    failures.set(who, { n: (f && f.until > now() ? f.n : 0) + 1, until: now() + 15 * 60_000 })
+    throw new HttpError(401, 'Wrong email or password')
+  }
+  failures.delete(who)
+  if (failures.size > 5000) failures.clear()
+  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now())
   startSession(res, u.id)
   res.json({ user: publicUser(u) })
 })
@@ -166,7 +177,7 @@ api.delete('/numbers/:id', admin, async (req, res) => { await core.removeNumber(
 api.post('/numbers/:id/simulate', (req, res) => {
   const t = core.getTransport(String(req.params.id))
   if (!(t instanceof SandboxTransport)) bad('Only sandbox numbers can simulate incoming messages')
-  ;(t as SandboxTransport).simulate({ from: str(req.body.from, 'from'), name: req.body.name, text: str(req.body.text, 'text'), group: req.body.group })
+  ;(t as SandboxTransport).simulate({ from: str(req.body.from, 'from'), name: req.body.name, text: str(req.body.text, 'text'), group: req.body.group, timestamp: Number(req.body.timestamp) || undefined })
   res.json({ ok: true })
 })
 
@@ -208,8 +219,12 @@ api.post('/messages', async (req, res) => {
 api.get('/media/:id', (req, res) => {
   const m = need(core.getMessage(req.params.id))
   if (!m.media_path || !fs.existsSync(m.media_path)) throw new HttpError(404, 'No media')
-  res.setHeader('content-type', m.media_mime || 'application/octet-stream')
-  if (m.media_name) res.setHeader('content-disposition', `inline; filename="${encodeURIComponent(m.media_name)}"`)
+  const mime = String(m.media_mime || '').split(';')[0].trim().toLowerCase()
+  const inline = /^(image\/(png|jpe?g|gif|webp)|video\/(mp4|webm|3gpp|quicktime)|audio\/[\w.+-]+|application\/pdf)$/.test(mime)
+  res.setHeader('content-type', inline ? mime : 'application/octet-stream')
+  res.setHeader('x-content-type-options', 'nosniff')
+  res.setHeader('content-security-policy', "default-src 'none'; sandbox")
+  res.setHeader('content-disposition', `${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(m.media_name || 'file')}"`)
   fs.createReadStream(m.media_path).pipe(res)
 })
 
@@ -252,6 +267,8 @@ function validAutomation(b: any) {
   if (b.trigger?.type === 'schedule' && !/^\d\d:\d\d$/.test(b.trigger.time || '')) bad('Scheduled automations need a time (HH:MM)')
   if (b.actions && (!Array.isArray(b.actions) || !b.actions.length)) bad('Add at least one action')
   if (b.conditions && !Array.isArray(b.conditions)) bad('conditions must be a list')
+  for (const c of b.conditions || []) if (!c || typeof c.field !== 'string' || typeof c.op !== 'string') bad('Each condition needs a field and an operator')
+  for (const a of b.actions || []) if (!a || typeof a.type !== 'string') bad('Each action needs a type')
   return b
 }
 api.get('/automations', (_req, res) => res.json(listAutomations()))

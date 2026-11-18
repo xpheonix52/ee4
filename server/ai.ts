@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { db, getSetting } from './db.js'
-import { addLabel, addNote, assignChat, createTicket, getChat, sendMessage, updateChat } from './core.js'
+import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, sendMessage, updateChat } from './core.js'
 import { searchKnowledge } from './knowledge.js'
 import { externalTools } from './mcpClient.js'
 
@@ -164,6 +164,11 @@ export async function maybeAutoReply(chatId: string) {
   const number = db.prepare('SELECT * FROM numbers WHERE id = ?').get(chat.number_id) as any
   const on = chat.ai_mode === 'on' || (chat.ai_mode === 'default' && number?.ai_enabled)
   if (!on || (chat.type === 'group' && !getSetting('ai').replyInGroups)) return
+  if (autoReplyLimitReached(chatId)) {
+    updateChat(chatId, { ai_mode: 'off' })
+    addNote(chatId, 'AI agent paused itself here: too many automatic replies in a row without a teammate. This usually means the other side is also a bot. Switch the agent back on in the chat details when ready.', 'AI agent')
+    return
+  }
   if (busy.has(chatId)) { again.add(chatId); return }
   busy.add(chatId)
   try {

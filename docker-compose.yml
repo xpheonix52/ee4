@@ -1,0 +1,16 @@
+services:
+  switchboard:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - switchboard-data:/data   # database, WhatsApp logins and media live here
+    environment:
+      # Set to "true" once the app is served over HTTPS (behind Caddy, nginx, Cloudflare, etc.)
+      COOKIE_SECURE: "false"
+      # Set to "1" when a reverse proxy sits in front, so the real visitor IP is used for login throttling
+      TRUST_PROXY: "0"
+
+volumes:
+  switchboard-data:

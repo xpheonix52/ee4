@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 export const bus = new EventEmitter()
 bus.setMaxListeners(0)
 
-export type AppEvent = { event: string; data: any; meta?: { sentBy?: string } }
+export type AppEvent = { event: string; data: any; meta?: { sentBy?: string; stale?: boolean } }
 export function emit(event: string, data: any, meta?: AppEvent['meta']) {
   bus.emit('event', { event, data, meta } satisfies AppEvent)
 }

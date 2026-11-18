@@ -34,10 +34,12 @@ export function startBackground() {
         if (events.includes('*') || events.includes(evt.event)) deliver(hook, evt).catch(() => {})
       }
     }
+    // Backlog delivered after downtime is stored and shown, but never auto-answered hours late.
+    if (evt.meta?.stale) return
     // Automations run first; the AI agent only steps in when no automation already answered.
     runAutomations(evt)
       .then((replied) => {
-        if (evt.event === 'message.received' && !replied && evt.data.message?.text) return maybeAutoReply(evt.data.chat.id)
+        if (evt.event === 'message.received' && !replied && evt.data.message?.text && evt.data.message.type !== 'other') return maybeAutoReply(evt.data.chat.id)
       })
       .catch((e) => console.error('[automation] failed', e))
   })

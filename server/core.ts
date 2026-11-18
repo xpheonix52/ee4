@@ -25,7 +25,7 @@ export async function startNumber(n: { id: string; kind: string }) {
       const row = getNumber(n.id)
       if (row) emit('number.status', numberView(row))
     },
-    onMessage: (m: Incoming) => { try { ingest(n.id, m) } catch (e) { console.error('[core] ingest failed', e) } },
+    onMessage: (m: Incoming, history?: boolean) => { try { ingest(n.id, m, { silent: history }) } catch (e) { console.error('[core] ingest failed', e) } },
     onReceipt: (waId: string, status: string) => {
       const msg = db.prepare("SELECT m.* FROM messages m JOIN chats c ON c.id = m.chat_id WHERE c.number_id = ? AND m.wa_id = ? AND m.direction = 'out'").get(n.id, waId) as any
       const rank: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3 }
@@ -45,6 +45,9 @@ export async function removeNumber(numberId: string) {
   db.prepare('DELETE FROM numbers WHERE id = ?').run(numberId)
 }
 export async function startAllNumbers() {
+  // The send queue lives in memory. Anything still waiting when the process stopped is marked failed
+  // rather than re-sent, because a message may already have gone out just before the restart.
+  db.prepare(`UPDATE messages SET status = 'failed', error = 'Interrupted by a server restart. Send again if needed.' WHERE status = 'pending'`).run()
   for (const n of db.prepare('SELECT * FROM numbers').all() as any[]) {
     startNumber(n).catch((e) => console.error(`[core] could not start number ${n.name}`, e))
   }
@@ -86,8 +89,14 @@ export function listMessages(chatId: string, opts: { before?: number; limit?: nu
 
 // ---------- chats ----------
 export function upsertChat(numberId: string, jid: string, info: { type?: string; name?: string; phone?: string }) {
-  const existing = db.prepare('SELECT * FROM chats WHERE number_id = ? AND jid = ?').get(numberId, jid) as any
+  const existing = (db.prepare('SELECT * FROM chats WHERE number_id = ? AND jid = ?').get(numberId, jid)
+    // Same person reached under a different address form (LID vs phone number): reuse their chat.
+    ?? (info.phone && info.type !== 'group' ? db.prepare(`SELECT * FROM chats WHERE number_id = ? AND phone = ? AND type = 'dm'`).get(numberId, info.phone) : undefined)) as any
   if (existing) {
+    // Group subjects follow WhatsApp. A contact's name is only filled in while it is still the
+    // phone-number placeholder, so a name your team typed is never overwritten.
+    const placeholder = !existing.name || existing.name === existing.phone || existing.name === existing.jid.split('@')[0]
+    if (!(existing.type === 'group' || placeholder)) info = { ...info, name: undefined }
     if ((info.name && info.name !== existing.name) || (info.phone && !existing.phone)) {
       db.prepare('UPDATE chats SET name = COALESCE(?, name), phone = COALESCE(phone, ?) WHERE id = ?').run(info.name ?? null, info.phone ?? null, existing.id)
       return { chat: db.prepare('SELECT * FROM chats WHERE id = ?').get(existing.id) as any, created: false }
@@ -140,7 +149,9 @@ function preview(type: string, text: string) {
   return (text || `[${type}]`).slice(0, 140)
 }
 
-export function ingest(numberId: string, m: Incoming) {
+const STALE_MS = 10 * 60_000
+/** Store a message from WhatsApp. `silent` is for history sync: no unread count, no events, no automations. */
+export function ingest(numberId: string, m: Incoming, opts: { silent?: boolean } = {}) {
   const { chat, created } = upsertChat(numberId, m.jid, { type: m.chatType, name: m.chatName, phone: m.phone })
   if (db.prepare('SELECT 1 FROM messages WHERE chat_id = ? AND wa_id = ?').get(chat.id, m.waId)) return
   const messageId = id('msg')
@@ -148,12 +159,17 @@ export function ingest(numberId: string, m: Incoming) {
   db.prepare(`INSERT INTO messages(id, chat_id, wa_id, direction, sender_jid, sender_name, type, text, media_path, media_mime, media_name, status, sent_by, created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(messageId, chat.id, m.waId, m.fromMe ? 'out' : 'in', m.senderJid ?? null, m.senderName ?? null, m.type, m.text,
     mediaPath, m.media?.mime ?? null, m.media?.name ?? null, m.fromMe ? 'sent' : 'received', m.fromMe ? 'phone' : null, m.timestamp)
-  db.prepare(`UPDATE chats SET last_message_at = ?, last_message_preview = ?, unread = unread + ?, status = CASE WHEN ? THEN 'open' ELSE status END WHERE id = ?`)
-    .run(m.timestamp, preview(m.type, m.text), m.fromMe ? 0 : 1, m.fromMe ? 0 : 1, chat.id)
+  const bump = m.fromMe || opts.silent ? 0 : 1
+  if (m.timestamp >= (chat.last_message_at || 0)) {
+    db.prepare(`UPDATE chats SET last_message_at = ?, last_message_preview = ?, unread = unread + ?, status = CASE WHEN ? THEN 'open' ELSE status END WHERE id = ?`)
+      .run(m.timestamp, preview(m.type, m.text), bump, bump, chat.id)
+  } else if (bump) db.prepare(`UPDATE chats SET unread = unread + 1, status = 'open' WHERE id = ?`).run(chat.id)
+  if (opts.silent) return
   const fresh = getChat(chat.id)
   const message = messageView(getMessage(messageId))
-  if (created) emit('chat.created', { chat: fresh })
-  emit(m.fromMe ? 'message.sent' : 'message.received', { message, chat: fresh }, { sentBy: m.fromMe ? 'phone' : undefined })
+  const stale = now() - m.timestamp > STALE_MS
+  if (created) emit('chat.created', { chat: fresh }, { stale })
+  emit(m.fromMe ? 'message.sent' : 'message.received', { message, chat: fresh }, { sentBy: m.fromMe ? 'phone' : undefined, stale })
 }
 
 const queues = new Map<string, Promise<void>>()
@@ -195,9 +211,17 @@ export function sendMessage(input: { chatId: string; text?: string; media?: { bu
       emit('message.updated', { message: messageView(getMessage(messageId)) })
     }
   }
-  const tail = (queues.get(chat.number_id) ?? Promise.resolve()).then(job)
-  queues.set(chat.number_id, tail)
+  // Broadcasts pace themselves in their own lane so they never hold up a teammate's or the agent's reply.
+  const lane = broadcast ? `${chat.number_id}:bulk` : chat.number_id
+  const tail = (queues.get(lane) ?? Promise.resolve()).then(job)
+  queues.set(lane, tail)
   return { message: messageView(getMessage(messageId)), done: tail }
+}
+
+/** True when bots have sent a burst into this chat with no human in between: almost always a bot-to-bot loop. */
+export function autoReplyLimitReached(chatId: string, max = 8, windowMs = 10 * 60_000) {
+  const rows = db.prepare(`SELECT sent_by FROM messages WHERE chat_id = ? AND direction = 'out' AND created_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(chatId, now() - windowMs, max) as any[]
+  return rows.length >= max && rows.every((r) => /^(ai|automation:)/.test(r.sent_by || ''))
 }
 
 export function addNote(chatId: string, text: string, author: string) {

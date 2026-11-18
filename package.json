@@ -9,9 +9,9 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
-    "test:e2e": "playwright test --trace off",
-    "qa": "npm run typecheck && npm test && npm run build && npm run test:e2e"
+    "test": "node --import tsx --test tests/api.test.ts",
+    "test:e2e": "npm run build && node --import tsx --test tests/e2e.test.ts",
+    "qa": "npm run typecheck && npm test && npm run test:e2e"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.10.0",

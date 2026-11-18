@@ -1,6 +1,6 @@
 import { db, id, now, getSetting, token } from './db.js'
 import { emit, type AppEvent } from './bus.js'
-import { addLabel, addNote, assignChat, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat } from './core.js'
+import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat } from './core.js'
 import { agentReply, generate } from './ai.js'
 
 export const TRIGGERS = ['message.received', 'message.sent', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
@@ -84,12 +84,14 @@ async function runAction(a: Action, ctx: any, auto: Automation, state: { replied
   const needChat = () => { if (!chatId) throw new Error('This action needs a chat, but the trigger has none. Pick a target chat.'); return chatId }
   switch (a.type) {
     case 'send_message': {
+      if (ctx.message && autoReplyLimitReached(needChat())) throw new Error('Skipped: too many automatic replies in a row in this chat (possible bot loop)')
       const text = render(a.text, ctx)
       await sendMessage({ chatId: needChat(), text, sentBy: `automation:${auto.id}`, senderName: auto.name }).done
       state.replied = true
       return `Sent: ${text.slice(0, 80)}`
     }
     case 'ai_reply': {
+      if (autoReplyLimitReached(needChat())) throw new Error('Skipped: too many automatic replies in a row in this chat (possible bot loop)')
       const { text } = await agentReply(needChat())
       if (text) await sendMessage({ chatId: needChat(), text, sentBy: 'ai', senderName: getSetting('ai').agentName }).done
       state.replied = true
@@ -156,6 +158,8 @@ export function buildContext(data: any) {
   }
 }
 
+const claimed = new Map<string, number>()
+
 /** Run every enabled automation matching this event. Returns true when one of them replied in the chat. */
 export async function runAutomations(evt: AppEvent) {
   if (!(TRIGGERS as readonly string[]).includes(evt.event)) return false
@@ -164,16 +168,24 @@ export async function runAutomations(evt: AppEvent) {
   let replied = false
   for (const auto of listAutomations()) {
     if (!auto.enabled || auto.trigger.type !== evt.event) continue
-    const ctx = buildContext(evt.data)
-    const results = auto.conditions.map((c) => test(c, ctx))
-    const pass = !results.length || (auto.match === 'any' ? results.some(Boolean) : results.every(Boolean))
-    if (!pass) continue
-    if (auto.cooldown_minutes && ctx.chat) {
-      const last = db.prepare('SELECT created_at FROM automation_runs WHERE automation_id = ? AND chat_id = ? ORDER BY created_at DESC LIMIT 1').get(auto.id, ctx.chat.id) as any
-      if (last && now() - last.created_at < auto.cooldown_minutes * 60_000) continue
+    // One broken rule must never stop the others, or the AI agent, from running.
+    try {
+      const ctx = buildContext(evt.data)
+      const results = auto.conditions.map((c) => test(c, ctx))
+      const pass = !results.length || (auto.match === 'any' ? results.some(Boolean) : results.every(Boolean))
+      if (!pass) continue
+      if (auto.cooldown_minutes && ctx.chat) {
+        const key = `${auto.id}:${ctx.chat.id}`
+        const window = auto.cooldown_minutes * 60_000
+        const last = db.prepare('SELECT created_at FROM automation_runs WHERE automation_id = ? AND chat_id = ? ORDER BY created_at DESC LIMIT 1').get(auto.id, ctx.chat.id) as any
+        if ((last && now() - last.created_at < window) || now() - (claimed.get(key) || 0) < window) continue
+        claimed.set(key, now()) // claim before the first await, so a burst of messages cannot slip through
+      }
+      const r = await executeAutomation(auto, ctx, `${evt.event}: ${ctx.message?.text || ctx.ticket?.title || ctx.chat?.name || ''}`)
+      replied ||= r.replied
+    } catch (e) {
+      console.error(`[automation] "${auto.name}" crashed`, e)
     }
-    const r = await executeAutomation(auto, ctx, `${evt.event}: ${ctx.message?.text || ctx.ticket?.title || ctx.chat?.name || ''}`)
-    replied ||= r.replied
   }
   return replied
 }
