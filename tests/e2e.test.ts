@@ -90,6 +90,13 @@ test('inbox: live incoming message, reply, note, label, ticket', async () => {
   await page.getByLabel('New ticket title').fill('Send Maya a quote')
   await page.getByRole('button', { name: 'Create', exact: true }).click()
   await see('#1 Send Maya a quote')
+  // Maya's unanswered question was flagged automatically and shows under Flagged.
+  await page.getByTestId('messages').getByText('Needs an answer').first().waitFor()
+  await page.getByRole('button', { name: 'Flagged', exact: true }).click()
+  await page.getByTestId('chat-list').getByText('Maya', { exact: true }).waitFor()
+  await page.getByLabel('Filter by label').selectOption({ label: 'VIP' })
+  await page.getByTestId('chat-list').getByText('Maya', { exact: true }).waitFor()
+  await page.getByLabel('Filter by label').selectOption('')
   await page.getByRole('button', { name: 'Mine' }).click()
   await page.getByTestId('chat-list').getByText('Maya', { exact: true }).waitFor()
   await shot('03-inbox')
@@ -98,6 +105,11 @@ test('inbox: live incoming message, reply, note, label, ticket', async () => {
 test('tickets board moves a ticket through its stages', async () => {
   await nav('Tickets')
   await page.getByTestId('column-open').getByText('#1 Send Maya a quote').waitFor()
+  await page.getByLabel('Status of ticket 1').selectOption('in_progress')
+  await page.getByTestId('column-in_progress').getByText('#1 Send Maya a quote').waitFor()
+  // Cards can also be dragged between columns.
+  await page.getByTestId('ticket-card').first().dragTo(page.getByTestId('column-resolved'))
+  await page.getByTestId('column-resolved').getByText('#1 Send Maya a quote').waitFor()
   await page.getByLabel('Status of ticket 1').selectOption('in_progress')
   await page.getByTestId('column-in_progress').getByText('#1 Send Maya a quote').waitFor()
   await shot('04-tickets')
@@ -246,6 +258,13 @@ test('self-training learns from a teammate, and the assistant works across the w
   await see(/search_knowledge/)
   await shot('12-agent-logs')
 
+  await nav('Analytics')
+  await page.getByTestId('team-table').getByText('Olivia Owner').waitFor()
+  await see('Average time to resolve')
+  await shot('15-analytics')
+  await nav('Settings')
+  await page.getByTestId('audit-log').getByText(/Added automations: Pricing auto-reply/).waitFor()
+
   await nav('Assistant')
   await page.getByLabel('Ask the assistant').fill('who is on the team?')
   await page.getByRole('button', { name: 'Send to assistant' }).click()
@@ -310,12 +329,12 @@ test('broadcast to several chats', async () => {
   await page.getByRole('button', { name: 'New message' }).first().click()
   await page.getByRole('dialog').getByText('Maya', { exact: true }).click()
   await page.getByRole('dialog').getByText('Noah', { exact: true }).click()
-  await page.getByLabel('Message', { exact: true }).fill('We are closed this Friday for a public holiday.')
+  await page.getByRole('dialog').getByPlaceholder('Hi {{contact.name}}, …').fill('Hi {{contact.name}}, we are closed this Friday for a public holiday.')
   await page.getByRole('button', { name: 'Send to 2 chats' }).click()
   await page.getByTestId('scheduled-row').getByText('Sent', { exact: true }).waitFor({ timeout: 8000 }).catch(async () => { await page.reload(); await page.getByTestId('scheduled-row').getByText('Sent', { exact: true }).waitFor() })
   await nav('Inbox')
   await page.getByTestId('chat-list').getByText('Noah', { exact: true }).click()
-  await page.getByTestId('messages').getByText('We are closed this Friday for a public holiday.').waitFor()
+  await page.getByTestId('messages').getByText('Hi Noah, we are closed this Friday for a public holiday.').waitFor()
 })
 
 test('team: add a teammate who can work the inbox but not admin areas', async () => {
@@ -355,7 +374,7 @@ test('team: add a teammate who can work the inbox but not admin areas', async ()
 
 test('works on a phone-sized screen without sideways scrolling', async () => {
   await page.setViewportSize({ width: 390, height: 800 })
-  for (const path of ['/', '/inbox', '/automations', '/agent', '/assistant', '/tickets', '/settings', '/knowledge', '/broadcasts', '/numbers']) {
+  for (const path of ['/', '/inbox', '/automations', '/agent', '/assistant', '/analytics', '/tickets', '/settings', '/knowledge', '/broadcasts', '/numbers']) {
     await page.goto(app.url + path)
     await page.waitForLoadState('networkidle')
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)

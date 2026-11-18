@@ -332,6 +332,15 @@ test('training the agent: persona, FAQs, custom tools, activation, self-training
   assert.equal((await app.ok('POST', '/ai/training/run', {})).learned, 0)
   assert.equal((await app.ok('GET', '/ai/training')).length, 2)
 
+  // AI flagging: the model decides which messages the team must not miss.
+  await app.ok('PUT', '/settings', { flagging: { mode: 'ai', rules: 'Never flag thanks.' } })
+  await simulate('thanks a lot', '15550072', 'Wes')
+  await simulate('my parcel never arrived', '15550072', 'Wes')
+  const wes = await until(() => chatByPhone('15550072'), 'chat')
+  await until(async () => (await messages(wes.id)).some((m: any) => m.text === 'my parcel never arrived' && m.flagged), 'AI flag')
+  assert.equal((await messages(wes.id)).find((m: any) => m.text === 'thanks a lot').flagged, false)
+  await app.ok('PUT', '/settings', { flagging: { mode: 'smart', rules: '' } })
+
   // Workspace assistant uses the same tools as the MCP server.
   const a = await app.ok('POST', '/assistant', { messages: [{ role: 'user', text: 'who is on the team?' }] })
   assert.match(a.text, /agent@test\.dev/); assert.equal(a.steps[0].tool, 'list_team')
@@ -540,6 +549,40 @@ test('monitoring: unanswered chats, quiet customers, follow-up reminders, messag
   assert.equal((await messages(vic.id)).filter((m: any) => /Follow-up reminder/.test(m.text)).length, 1)
   assert.equal((await app.ok('PATCH', `/chats/${vic.id}`, { follow_up_at: null })).follow_up_at, null)
   assert.equal((await app.ok('GET', '/chats?follow_up=true')).length, 0)
+
+  // Flagging: questions and problems are flagged, pleasantries are not, and a reply clears them.
+  await simulate('ok great', '15550081', 'Xan')
+  await simulate('Can you send me the invoice?', '15550081', 'Xan')
+  const xan = await until(() => chatByPhone('15550081'), 'chat')
+  await until(async () => (await app.ok('GET', `/chats/${xan.id}`)).flagged === 1, 'smart flag')
+  assert.deepEqual((await messages(xan.id)).map((m: any) => m.flagged), [false, true])
+  assert.ok((await app.ok('GET', '/chats?flagged=true')).some((c: any) => c.id === xan.id))
+  await app.ok('POST', `/chats/${xan.id}/messages`, { text: 'Sent!' })
+  await until(async () => (await app.ok('GET', `/chats/${xan.id}`)).flagged === 0, 'reply clears flags')
+  const first = (await messages(xan.id))[0]
+  assert.equal((await app.ok('POST', `/messages/${first.id}/flag`, {})).flagged, true)
+  await app.ok('POST', '/tickets', { chat_id: xan.id, message_id: first.id, title: 'From flagged' })
+  assert.equal((await messages(xan.id))[0].flagged, false, 'raising a ticket from a message unflags it')
+
+  // Mentions: a note that @names me shows the chat under my mentions.
+  await app.ok('POST', `/chats/${xan.id}/notes`, { text: '@Owner can you approve this discount?' })
+  assert.deepEqual((await app.ok('GET', '/chats?mentions=me')).map((c: any) => c.id), [xan.id])
+
+  // Bulk messages can address each person by name.
+  await app.ok('POST', '/scheduled', { chat_ids: [xan.id], text: 'Hi {{contact.name}}, our new catalogue is out.' })
+  await until(async () => (await outbound(xan.id)).some((m: any) => m.text === 'Hi Xan, our new catalogue is out.'), 'personalised broadcast')
+
+  // Team and ticket analytics, and the audit trail.
+  const stats = await app.ok('GET', '/analytics?days=30')
+  assert.equal(stats.by_day.length, 30)
+  const owner = stats.team.find((t: any) => t.name === 'Owner')
+  assert.ok(owner.sent > 3 && owner.chats > 1 && typeof owner.avg_response_seconds === 'number')
+  assert.equal(stats.tickets.total, stats.tickets.open + stats.tickets.in_progress + stats.tickets.resolved)
+  await app.ok('POST', '/labels', { name: 'From API' }, { key: apiKey })
+  const audit = await app.ok('GET', '/audit')
+  assert.ok(audit.some((a: any) => a.action === 'Added automations' && a.detail === 'SLA' && a.actor === 'Owner'))
+  assert.ok(audit.some((a: any) => /^API key: /.test(a.actor)), 'API activity is attributed to its key')
+  assert.ok(!audit.some((a: any) => /chats|messages/.test(a.action)), 'chat traffic stays out of the audit trail')
 
   // Search looks inside message history, not just names.
   assert.deepEqual((await app.ok('GET', '/chats?q=Fixed it for you')).map((c: any) => c.id), [vic.id])

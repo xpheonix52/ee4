@@ -89,6 +89,8 @@ function addColumn(table: string, column: string, ddl: string) {
 addColumn('chats', 'props', `TEXT NOT NULL DEFAULT '{}'`)
 addColumn('chats', 'internal', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('chats', 'ai_snooze_until', 'INTEGER')
+addColumn('messages', 'flagged', 'INTEGER NOT NULL DEFAULT 0')
+db.exec('CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT, created_at INTEGER NOT NULL)')
 addColumn('chats', 'follow_up_at', 'INTEGER')
 addColumn('chats', 'follow_up_note', 'TEXT')
 addColumn('chats', 'follow_up_notified', 'INTEGER NOT NULL DEFAULT 0')
@@ -114,6 +116,7 @@ export type Settings = {
   workspace: { name: string; timezoneOffsetMinutes: number }
   businessHours: { enabled: boolean; days: number[]; start: string; end: string }
   sending: { minDelayMs: number; maxDelayMs: number; broadcastMinDelayMs: number; broadcastMaxDelayMs: number; broadcastDailyLimit: number }
+  flagging: { mode: 'smart' | 'ai' | 'off'; rules: string }
   ai: {
     provider: 'anthropic' | 'openai'; apiKey: string; baseUrl: string; model: string
     agentName: string; instructions: string; replyInGroups: boolean; handoffMessage: string
@@ -127,6 +130,7 @@ const DEFAULTS: Settings = {
   workspace: { name: 'My Team', timezoneOffsetMinutes: 0 },
   businessHours: { enabled: false, days: [1, 2, 3, 4, 5], start: '09:00', end: '18:00' },
   sending: { minDelayMs: 1500, maxDelayMs: 4000, broadcastMinDelayMs: 8000, broadcastMaxDelayMs: 20000, broadcastDailyLimit: 200 },
+  flagging: { mode: 'smart', rules: '' },
   ai: {
     provider: 'anthropic', apiKey: '', baseUrl: '', model: 'claude-opus-5-5', agentName: 'Assistant',
     instructions: 'You are a friendly, concise support assistant replying on WhatsApp. Answer using the knowledge hub. If you are not sure or the customer asks for a person, hand off to a human.',

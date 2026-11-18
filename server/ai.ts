@@ -323,6 +323,16 @@ async function passesActivationRules(text: string) {
   return !/^\s*no\b/i.test(verdict.text)
 }
 
+/** AI flagging: is this a message the team must not miss? */
+export async function aiShouldFlag(text: string) {
+  const rules = getSetting('flagging').rules.trim()
+  const verdict = await runModel(
+    'You decide whether a WhatsApp message to a business needs the team\'s attention. Answer only YES or NO.',
+    [{ role: 'user', text: `Flag messages that ask a question, report a problem, request something, or otherwise need a response. Do not flag greetings, thanks, acknowledgments or chit-chat.${rules ? `\n\nExtra rules from the team (these take priority):\n${rules}` : ''}\n\nMessage: """${text}"""\n\nFlag it? Answer only YES or NO.` }],
+  )
+  return /^\s*yes\b/i.test(verdict.text)
+}
+
 /** Auto-reply to an incoming message when the agent is switched on for this chat. */
 export async function maybeAutoReply(chatId: string) {
   const cfg = getSetting('ai')

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot, Check, Ticket, CalendarClock, Wand2, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Bot, Check, Ticket, Flag, CalendarClock, Wand2, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
 import { api, clock, timeAgo, useData, useLive } from '../api'
 import { Avatar, Empty, Modal, useAction } from '../ui'
 import { useApp } from '../App'
 
-const TABS = [['all', 'All'], ['waiting', 'Needs reply'], ['followup', 'Follow up'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
+const TABS = [['all', 'All'], ['waiting', 'Needs reply'], ['flagged', 'Flagged'], ['followup', 'Follow up'], ['mentions', 'Mentions'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
 
 export default function Inbox() {
   const { chatId } = useParams()
   const nav = useNavigate()
-  const { numbers } = useApp()
+  const { numbers, labels } = useApp()
+  const [labelId, setLabelId] = useState('')
   const [tab, setTab] = useState<(typeof TABS)[number][0]>('all')
   const [q, setQ] = useState('')
   const [numberId, setNumberId] = useState('')
@@ -23,10 +24,13 @@ export default function Inbox() {
     if (tab === 'unread') p.set('unread', 'true')
     if (tab === 'waiting') p.set('needs_reply', 'true')
     if (tab === 'followup') p.set('follow_up', 'true')
+    if (tab === 'flagged') p.set('flagged', 'true')
+    if (tab === 'mentions') p.set('mentions', 'me')
+    if (labelId) p.set('label', labelId)
     if (tab === 'mine') p.set('assignee', 'me')
     if (tab === 'unassigned') p.set('assignee', 'none')
     return p.toString()
-  }, [q, numberId, tab])
+  }, [q, numberId, tab, labelId])
   const load = useCallback(() => api('GET', `/chats?${query}`).then(setChats).catch(() => setChats([])), [query])
   useEffect(() => { const t = setTimeout(load, q ? 200 : 0); return () => clearTimeout(t) }, [load, q])
   useLive((e) => { if (/^(message|chat|note)\./.test(e)) load() })
@@ -44,6 +48,12 @@ export default function Inbox() {
               <button key={k} onClick={() => setTab(k)} className={`cursor-pointer rounded-md px-2 py-1 text-xs font-medium ${tab === k ? 'bg-brand-50 text-brand-800' : 'text-slate-500 hover:bg-slate-100'}`}>{label}</button>
             ))}
           </div>
+          {labels.length > 0 && (
+            <select className="input !py-1 text-xs" value={labelId} onChange={(e) => setLabelId(e.target.value)} aria-label="Filter by label">
+              <option value="">Any label</option>
+              {labels.map((l: any) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+          )}
           {numbers.length > 1 && (
             <select className="input !py-1 text-xs" value={numberId} onChange={(e) => setNumberId(e.target.value)} aria-label="Filter by number">
               <option value="">All numbers</option>
@@ -67,6 +77,7 @@ export default function Inbox() {
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className={`truncate text-xs ${c.unread ? 'text-slate-800' : 'text-slate-500'}`}>{c.last_message_preview || 'No messages yet'}</span>
+                  {c.flagged > 0 && <Flag size={12} className="shrink-0 fill-amber-400 text-amber-500" aria-label="Has flagged messages" />}
                   {c.unread > 0 && <span className="shrink-0 rounded-full bg-brand-600 px-1.5 text-xs font-medium text-white">{c.unread}</span>}
                 </div>
                 {(c.labels.length > 0 || c.status === 'closed' || c.follow_up_at) && (
@@ -170,7 +181,7 @@ function Conversation({ chatId }: { chatId: string }) {
             return (
               <div key={m.id}>
                 {showDay && <div className="my-3 text-center"><span className="rounded-md bg-white/80 px-2 py-0.5 text-xs text-slate-500">{day === new Date().toDateString() ? 'Today' : day}</span></div>}
-                <Bubble m={m} group={chat.type === 'group'} onTicket={m.direction === 'in' && m.text ? () => run(() => api('POST', '/tickets', { chat_id: chatId, message_id: m.id, title: m.text.slice(0, 120) }), 'Ticket created from message') : undefined} />
+                <Bubble m={m} group={chat.type === 'group'} onFlag={m.direction === 'in' ? () => run(() => api('POST', `/messages/${m.id}/flag`, { flagged: !m.flagged })).then(loadMsgs) : undefined} onTicket={m.direction === 'in' && m.text ? () => run(() => api('POST', '/tickets', { chat_id: chatId, message_id: m.id, title: m.text.slice(0, 120) }), 'Ticket created from message') : undefined} />
               </div>
             )
           })}
@@ -214,7 +225,7 @@ function Conversation({ chatId }: { chatId: string }) {
             {mode === 'reply' && <button className="btn btn-ghost !p-2" onClick={() => fileInput.current?.click()} aria-label="Attach a file"><Paperclip size={18} /></button>}
             <textarea
               className="input max-h-40 min-h-[38px] flex-1 resize-none" rows={Math.min(6, Math.max(1, text.split('\n').length))}
-              placeholder={mode === 'note' ? 'Write a note only your team can see…' : 'Type a message. Enter to send, / for quick replies'} aria-label={mode === 'note' ? 'Private note' : 'Message'}
+              placeholder={mode === 'note' ? 'Write a note only your team can see. Use @name to mention a teammate' : 'Type a message. Enter to send, / for quick replies'} aria-label={mode === 'note' ? 'Private note' : 'Message'}
               value={text} onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (slash.length) setText(slash[0].text); else send() } }}
             />
@@ -231,7 +242,7 @@ function Conversation({ chatId }: { chatId: string }) {
   )
 }
 
-function Bubble({ m, group, onTicket }: { m: any; group: boolean; onTicket?: () => void }) {
+function Bubble({ m, group, onTicket, onFlag }: { m: any; group: boolean; onTicket?: () => void; onFlag?: () => void }) {
   if (m.direction === 'note') {
     return (
       <div className="flex justify-center">
@@ -246,7 +257,8 @@ function Bubble({ m, group, onTicket }: { m: any; group: boolean; onTicket?: () 
   const by = !out ? null : m.sent_by === 'ai' ? 'AI agent' : m.sent_by?.startsWith('automation') ? `Automation · ${m.sender_name || ''}` : m.sent_by === 'phone' ? 'Sent from phone' : m.sent_by === 'api' ? 'API' : m.sent_by === 'mcp' ? 'MCP' : /^(broadcast|scheduled)/.test(m.sent_by || '') ? 'Scheduled' : m.sender_name
   return (
     <div className={`group flex items-center gap-1 ${out ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[80%] rounded-xl px-3 py-1.5 text-sm shadow-sm sm:max-w-[65%] ${out ? 'rounded-br-sm bg-[#d9fdd3]' : 'rounded-bl-sm bg-white'}`}>
+      <div className={`max-w-[80%] rounded-xl px-3 py-1.5 text-sm shadow-sm sm:max-w-[65%] ${out ? 'rounded-br-sm bg-[#d9fdd3]' : 'rounded-bl-sm bg-white'} ${m.flagged ? 'ring-2 ring-amber-400' : ''}`} id={`msg-${m.id}`}>
+        {m.flagged && <div className="flex items-center gap-1 text-xs font-medium text-amber-600"><Flag size={11} className="fill-amber-400" />Needs an answer</div>}
         {!out && group && <div className="text-xs font-medium text-brand-700">{m.sender_name}</div>}
         {by && <div className="flex items-center gap-1 text-xs font-medium text-slate-500">{m.sent_by === 'ai' && <Bot size={11} />}{by}</div>}
         {m.media_url && (m.type === 'image' || m.type === 'sticker'
@@ -263,6 +275,7 @@ function Bubble({ m, group, onTicket }: { m: any; group: boolean; onTicket?: () 
             : <CheckCheck size={13} aria-label={m.status === 'read' ? 'Read' : 'Delivered'} className={m.status === 'read' ? 'text-sky-500' : ''} />)}
         </div>
       </div>
+      {onFlag && <button onClick={onFlag} title={m.flagged ? 'Remove flag' : 'Flag as important'} aria-label={m.flagged ? 'Remove flag' : 'Flag as important'} className="cursor-pointer rounded-full bg-white p-1.5 text-slate-500 opacity-0 shadow-sm group-hover:opacity-100 hover:text-amber-600 focus:opacity-100"><Flag size={14} /></button>}
       {onTicket && <button onClick={onTicket} title="Create a ticket from this message" aria-label="Create a ticket from this message" className="cursor-pointer rounded-full bg-white p-1.5 text-slate-500 opacity-0 shadow-sm group-hover:opacity-100 hover:text-brand-700 focus:opacity-100"><Ticket size={14} /></button>}
     </div>
   )

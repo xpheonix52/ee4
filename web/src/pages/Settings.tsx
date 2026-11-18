@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Trash2 } from 'lucide-react'
-import { api, useData } from '../api'
+import { api, dateTime, useData } from '../api'
 import { Field, Page, Toggle, useAction } from '../ui'
 import { useApp } from '../App'
 
@@ -11,6 +11,7 @@ export default function Settings() {
   const run = useAction()
   const saved = useData('/settings')
   const quick = useData<any[]>('/quick-replies')
+  const audit = useData<any[]>(me.role === 'admin' ? '/audit' : null)
   const [s, setS] = useState<any>(null)
   const [user, setUser] = useState({ name: '', email: '', password: '', role: 'agent' })
   const [label, setLabel] = useState({ name: '', color: '#2563eb' })
@@ -53,6 +54,18 @@ export default function Settings() {
           {admin && <button className="btn btn-primary" onClick={save}>Save settings</button>}
         </section>
 
+        <section className="card space-y-3 p-5">
+          <h2 className="font-medium">Flagging important messages</h2>
+          <p className="text-sm text-slate-500">Flagged messages are highlighted in the chat and collected under the Flagged tab, so questions do not get buried. A reply from the team clears the flag.</p>
+          <select className="input sm:!w-96" aria-label="Flagging mode" disabled={!admin} value={s.flagging.mode} onChange={(e) => upd('flagging', { mode: e.target.value })}>
+            <option value="smart">Automatic: questions, requests and problems (no AI cost)</option>
+            <option value="ai">AI decides (one small AI call per incoming message)</option>
+            <option value="off">Off: only flag by hand</option>
+          </select>
+          {s.flagging.mode === 'ai' && <Field label="Extra rules for the AI (optional)"><textarea className="input" rows={3} disabled={!admin} value={s.flagging.rules} onChange={(e) => upd('flagging', { rules: e.target.value })} placeholder={'Always flag anything about refunds or delivery delays.\nNever flag messages from our own drivers.'} /></Field>}
+          {admin && <button className="btn btn-primary" onClick={save}>Save settings</button>}
+        </section>
+
         <section className="card p-5">
           <h2 className="font-medium">Team</h2>
           <div className="mt-2 divide-y divide-slate-100">
@@ -88,6 +101,17 @@ export default function Settings() {
             <button className="btn btn-outline" disabled={!label.name.trim()} onClick={async () => { if (await run(() => api('POST', '/labels', label))) { setLabel({ ...label, name: '' }); refresh() } }}>Add label</button>
           </div>
         </section>
+
+        {admin && (
+          <section className="card p-5">
+            <h2 className="font-medium">Activity log</h2>
+            <p className="text-sm text-slate-500">Who changed what: settings, team, numbers, automations, knowledge and API keys.</p>
+            <div className="mt-2 max-h-72 divide-y divide-slate-100 overflow-y-auto" data-testid="audit-log">
+              {audit.data?.map((a) => <div key={a.id} className="flex items-center gap-3 py-1.5 text-sm"><span className="w-32 shrink-0 truncate font-medium">{a.actor}</span><span className="min-w-0 flex-1 truncate">{a.action}{a.detail ? `: ${a.detail}` : ''}</span><span className="shrink-0 text-xs text-slate-400">{dateTime(a.created_at)}</span></div>)}
+              {audit.data?.length === 0 && <div className="py-2 text-sm text-slate-400">Nothing yet.</div>}
+            </div>
+          </section>
+        )}
 
         <section className="card p-5">
           <h2 className="font-medium">Export data</h2>

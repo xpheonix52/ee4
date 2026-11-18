@@ -2,8 +2,10 @@ import crypto from 'node:crypto'
 import { db, id, now } from './db.js'
 import { bus, type AppEvent } from './bus.js'
 import { sendMessage } from './core.js'
-import { buildContext, executeAutomation, listAutomations, localNow, runAutomations, runTimedAutomations } from './automations.js'
-import { addNote, updateChat } from './core.js'
+import { buildContext, executeAutomation, listAutomations, localNow, render, runAutomations, runTimedAutomations } from './automations.js'
+import { addNote, clearFlags, getChat, looksImportant, setFlag, updateChat } from './core.js'
+import { getSetting } from './db.js'
+import { aiConfigured, aiShouldFlag } from './ai.js'
 import { maybeAutoReply, snoozeAgent } from './ai.js'
 import { maybeScheduledTraining } from './training.js'
 
@@ -39,6 +41,13 @@ export function startBackground() {
     // Backlog delivered after downtime is stored and shown, but never auto-answered hours late.
     if (evt.meta?.stale) return
     if (evt.event === 'message.sent' && /^(user:|phone$)/.test(evt.meta?.sentBy || '')) snoozeAgent(evt.data.chat.id)
+    // Any real reply (teammate, phone, AI agent, API) answers what was flagged. Broadcasts and rule-based sends do not.
+    if (evt.event === 'message.sent' && /^(user:|phone$|ai$|api$|mcp$)/.test(evt.meta?.sentBy || '')) clearFlags(evt.data.chat.id)
+    if (evt.event === 'message.received' && !evt.data.chat.internal && evt.data.message?.text) {
+      const mode = getSetting('flagging').mode, text = evt.data.message.text as string
+      if (mode === 'smart' && looksImportant(text)) setFlag(evt.data.message.id, true)
+      if (mode === 'ai') (aiConfigured() ? aiShouldFlag(text).catch(() => looksImportant(text)) : Promise.resolve(looksImportant(text))).then((yes) => { if (yes) setFlag(evt.data.message.id, true) })
+    }
     // Automations run first; the AI agent only steps in when no automation already answered.
     runAutomations(evt)
       .then((replied) => {
@@ -60,7 +69,7 @@ export async function tick() {
       db.prepare('UPDATE scheduled SET send_at = ?, sent_count = sent_count + ? WHERE id = ?').run(next, chatIds.length, s.id)
     } else db.prepare(`UPDATE scheduled SET status = 'sent', sent_count = ? WHERE id = ?`).run(chatIds.length, s.id)
     for (const chatId of chatIds) {
-      try { sendMessage({ chatId, text: s.text, sentBy: `${chatIds.length > 1 ? 'broadcast' : 'scheduled'}:${s.id}`, senderName: s.name || 'Scheduled' }) } catch { /* chat was deleted */ }
+      try { sendMessage({ chatId, text: render(s.text, buildContext({ chat: getChat(chatId) })), sentBy: `${chatIds.length > 1 ? 'broadcast' : 'scheduled'}:${s.id}`, senderName: s.name || 'Scheduled' }) } catch { /* chat was deleted */ }
     }
   }
   // Follow-up reminders a teammate set on a chat: bring it back to the top with a note.

@@ -63,17 +63,18 @@ export function chatView(c: any) {
   const labels = db.prepare('SELECT l.* FROM labels l JOIN chat_labels cl ON cl.label_id = l.id WHERE cl.chat_id = ? ORDER BY l.name').all(c.id)
   let props: Record<string, string> = {}
   try { props = JSON.parse(c.props || '{}') } catch { /* keep empty */ }
-  return { ...c, labels, props, internal: !!c.internal }
+  const flagged = (db.prepare('SELECT COUNT(*) n FROM messages WHERE chat_id = ? AND flagged = 1').get(c.id) as any).n as number
+  return { ...c, labels, props, internal: !!c.internal, flagged }
 }
 export function messageView(m: any) {
   if (!m) return m
   const { media_path, ...rest } = m
-  return { ...rest, media_url: media_path ? `/api/v1/media/${m.id}` : null }
+  return { ...rest, flagged: !!m.flagged, media_url: media_path ? `/api/v1/media/${m.id}` : null }
 }
 export const getChat = (chatId: string) => chatView(db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId))
 export const getMessage = (messageId: string) => db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId) as any
 
-export function listChats(f: { follow_up?: boolean; needs_reply?: boolean; q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
+export function listChats(f: { flagged?: boolean; mentions?: string; follow_up?: boolean; needs_reply?: boolean; q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
   const where: string[] = []
   const args: any[] = []
   if (f.q) {
@@ -82,6 +83,8 @@ export function listChats(f: { follow_up?: boolean; needs_reply?: boolean; q?: s
     args.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
   }
   if (f.follow_up) where.push('c.follow_up_at IS NOT NULL')
+  if (f.flagged) where.push('EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.flagged = 1)')
+  if (f.mentions) { where.push(`EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.direction = 'note' AND m.text LIKE ? AND m.created_at >= ?)`); args.push(`%@${f.mentions}%`, now() - 30 * 86_400_000) }
   if (f.number_id) { where.push('c.number_id = ?'); args.push(f.number_id) }
   if (f.status) { where.push('c.status = ?'); args.push(f.status) }
   if (f.type) { where.push('c.type = ?'); args.push(f.type) }
@@ -273,6 +276,7 @@ export function createTicket(t: { chatId?: string | null; messageId?: string | n
   db.prepare(`INSERT INTO tickets(id, seq, chat_id, message_id, title, description, priority, assignee_id, created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
     .run(ticketId, seq, t.chatId ?? null, t.messageId ?? null, t.title.slice(0, 200), t.description ?? null,
       ['low', 'medium', 'high', 'urgent'].includes(t.priority || '') ? t.priority : 'medium', t.assigneeId ?? null, t.createdBy, now(), now())
+  if (t.messageId) setFlag(t.messageId, false) // a ticket means the message is being dealt with
   const ticket = getTicket(ticketId)
   emit('ticket.created', { ticket, chat: ticket.chat_id ? getChat(ticket.chat_id) : null })
   return ticket
@@ -285,4 +289,21 @@ export function updateTicket(ticketId: string, patch: Record<string, any>) {
   const ticket = getTicket(ticketId)
   if (ticket) emit('ticket.updated', { ticket, chat: ticket.chat_id ? getChat(ticket.chat_id) : null })
   return ticket
+}
+
+// ---------- flagging: which customer messages need an answer ----------
+const IMPORTANT = /\?|\b(please|pls|help|need|issue|problem|urgent|asap|refund|cancel|complain|complaint|broken|error|not working|doesn'?t work|can you|could you|can i|how (do|can|much|long|to)|when|where|why|what|which|price|quote|order|invoice|payment|deliver|book|schedule|available)\b/i
+/** Fast, free first pass: does this read like a question, request or problem? */
+export const looksImportant = (text: string) => text.trim().length > 3 && IMPORTANT.test(text)
+
+export function setFlag(messageId: string, flagged: boolean) {
+  const m = getMessage(messageId)
+  if (!m || !!m.flagged === flagged) return m ? messageView(m) : null
+  db.prepare('UPDATE messages SET flagged = ? WHERE id = ?').run(flagged ? 1 : 0, messageId)
+  emit('message.updated', { message: messageView(getMessage(messageId)), chat: getChat(m.chat_id) })
+  return messageView(getMessage(messageId))
+}
+/** A reply from the team answers whatever was flagged in that chat. */
+export function clearFlags(chatId: string) {
+  if (db.prepare('UPDATE messages SET flagged = 0 WHERE chat_id = ? AND flagged = 1').run(chatId).changes) emit('chat.updated', { chat: getChat(chatId) })
 }

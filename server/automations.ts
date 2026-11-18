@@ -1,7 +1,7 @@
 import { db, id, now, getSetting, token, inBusinessHours, localNow } from './db.js'
 export { localNow }
 import { emit, type AppEvent } from './bus.js'
-import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat, updateTicket } from './core.js'
+import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, setFlag, updateChat, updateTicket } from './core.js'
 import { agentReply, generate } from './ai.js'
 
 export const TRIGGERS = ['message.received', 'message.sent', 'message.reaction', 'chat.waiting', 'chat.quiet', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
@@ -113,6 +113,11 @@ async function runAction(a: Action, ctx: any, auto: Automation, state: { replied
       if (['low', 'medium', 'high', 'urgent'].includes(a.priority)) patch.priority = a.priority
       ctx.ticket = updateTicket(t.id, patch)
       return `Ticket #${t.seq} updated`
+    }
+    case 'flag_message': {
+      if (!ctx.message?.id) throw new Error('There is no message to flag for this trigger')
+      setFlag(ctx.message.id, a.flagged !== 'no')
+      return a.flagged === 'no' ? 'Message unflagged' : 'Message flagged'
     }
     case 'set_property': {
       const key = render(a.key, ctx).trim()

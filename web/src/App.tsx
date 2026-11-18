@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
-import { BookOpen, Bot, Sparkles, Code2, Home as HomeIcon, Inbox as InboxIcon, LogOut, Megaphone, Settings as SettingsIcon, Smartphone, Ticket, Workflow } from 'lucide-react'
+import { BookOpen, Bot, Sparkles, BarChart3, Code2, Home as HomeIcon, Inbox as InboxIcon, LogOut, Megaphone, Settings as SettingsIcon, Smartphone, Ticket, Workflow } from 'lucide-react'
 import { api, connectLive, disconnectLive, useLive } from './api'
 import { Field, useAction } from './ui'
 import Home from './pages/Home'
@@ -14,6 +14,7 @@ import Broadcasts from './pages/Broadcasts'
 import Developers from './pages/Developers'
 import Settings from './pages/Settings'
 import Assistant from './pages/Assistant'
+import Analytics from './pages/Analytics'
 
 type AppState = { me: any; workspace: any; users: any[]; numbers: any[]; labels: any[]; refresh: () => Promise<void> }
 const Ctx = createContext<AppState>(null as any)
@@ -23,6 +24,7 @@ const NAV = [
   { to: '/', label: 'Home', icon: HomeIcon },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon },
   { to: '/tickets', label: 'Tickets', icon: Ticket },
+  { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/automations', label: 'Automations', icon: Workflow },
   { to: '/agent', label: 'AI Agent', icon: Bot },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpen },
@@ -108,6 +110,7 @@ export default function App() {
             <Route path="/agent" element={<Agent />} />
             <Route path="/knowledge" element={<Knowledge />} />
             <Route path="/assistant" element={<Assistant />} />
+            <Route path="/analytics" element={<Analytics />} />
             <Route path="/broadcasts" element={<Broadcasts />} />
             <Route path="/numbers" element={<Numbers />} />
             <Route path="/developers" element={<Developers />} />

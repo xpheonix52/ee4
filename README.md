@@ -66,6 +66,12 @@ Without Docker: `npm ci && npm run build && npm start` (Node 22+). For developme
 - **Monitoring and follow-up**: time-based triggers ("customer has waited N minutes", "customer quiet for N
   hours"), one-click follow-up reminders on any chat, a Follow up inbox view, 28 templates in 7 categories,
   and starter automations installed on a new workspace (only the one that never messages customers starts on).
+- **Flagging**: customer questions, requests and problems are flagged automatically (rule-based, or AI with
+  your own criteria), highlighted in the chat, and collected under a Flagged tab until someone replies.
+- **Analytics**: per-teammate messages, chats handled and average reply time; ticket totals and time to
+  resolve; 7, 30 or 90 days. **Activity log** of who changed what.
+- **Team work**: @mention teammates in private notes (Mentions tab), filter the inbox by label, drag
+  tickets between columns, personalise bulk messages with `{{contact.name}}`.
 - **Composer**: send later, AI rewrite (fix grammar, shorter, friendlier, translate), AI draft and summary.
 - **Also**: custom chat properties (visible to the agent and usable in automations), emoji ticketing
   (react to a message to raise a ticket), a "Needs reply" inbox view, tickets from any message, CSV exports.

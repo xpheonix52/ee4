@@ -60,7 +60,7 @@ function Composer({ onClose, onSaved }: { onClose: () => void; onSaved: () => vo
         </div>
         <div className="space-y-3">
           <Field label="Name (only you see this)"><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="June promotion" /></Field>
-          <Field label="Message"><textarea className="input" rows={5} value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} /></Field>
+          <Field label="Message" hint="Personalise with {{contact.name}}, {{chat.name}} or any chat property such as {{chat.props.plan}}."><textarea className="input" rows={5} value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} placeholder="Hi {{contact.name}}, …" /></Field>
           <div className="flex gap-4 text-sm">
             <label className="flex items-center gap-1.5"><input type="radio" checked={f.when === 'now'} onChange={() => setF({ ...f, when: 'now' })} />Send now</label>
             <label className="flex items-center gap-1.5"><input type="radio" checked={f.when === 'later'} onChange={() => setF({ ...f, when: 'later' })} />Schedule</label>

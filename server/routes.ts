@@ -105,6 +105,23 @@ api.post('/hooks/:id/:token', async (req, res) => {
 
 api.use(requireAuth)
 
+// Audit trail: who changed what. Chat traffic and AI test calls are left out to keep it readable.
+api.use((req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !/\/(messages|notes|read|simulate|simulate-reaction|test|check|assistant|draft|summary|rewrite|flag)(\/|$)/.test(req.path) && !/^\/chats\//.test(req.path)) {
+    res.on('finish', () => {
+      if (res.statusCode >= 400) return
+      const [, resource, , sub] = req.path.split('/')
+      const verb = req.method === 'DELETE' ? 'Removed' : req.method === 'POST' ? (sub ? 'Ran' : 'Added') : 'Changed'
+      const what = `${resource.replace(/-/g, ' ')}${sub ? ` (${sub.replace(/-/g, ' ')})` : ''}`
+      const name = typeof req.body?.name === 'string' ? req.body.name : typeof req.body?.title === 'string' ? req.body.title : typeof req.body?.email === 'string' ? req.body.email : ''
+      db.prepare('INSERT INTO audit_log(id, actor, action, detail, created_at) VALUES(?,?,?,?,?)').run(id('aud'), req.actor!.type === 'api' ? `API key: ${req.actor!.name}` : req.actor!.name, `${verb} ${what}`, name.slice(0, 120) || null, now())
+      db.prepare('DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY created_at DESC LIMIT 2000)').run()
+    })
+  }
+  next()
+})
+api.get('/audit', admin, (_req, res) => res.json(db.prepare('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 200').all()))
+
 api.get('/me', (req, res) => {
   const user = req.actor!.type === 'user' ? publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.actor!.id)) : { id: req.actor!.id, name: req.actor!.name, role: 'admin', api_key: true }
   res.json({ user, workspace: getSetting('workspace'), ai_configured: aiConfigured() })
@@ -193,7 +210,7 @@ api.post('/numbers/:id/simulate', (req, res) => {
 // ---------- chats & messages ----------
 api.get('/chats', (req, res) => {
   const q = req.query as Record<string, string>
-  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, needs_reply: q.needs_reply === 'true', follow_up: q.follow_up === 'true', status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
+  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, needs_reply: q.needs_reply === 'true', follow_up: q.follow_up === 'true', flagged: q.flagged === 'true', mentions: q.mentions === 'me' && req.actor!.type === 'user' ? req.actor!.name.split(' ')[0] : undefined, status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
 })
 api.get('/chats/:id', (req, res) => res.json(need(core.getChat(req.params.id), 'Chat not found')))
 api.patch('/chats/:id', (req, res) => {
@@ -236,6 +253,7 @@ api.post('/messages', async (req, res) => {
     : await core.chatForPhone(str(req.body.number_id, 'number_id (or chat_id)'), str(req.body.to, 'to'), req.body.name).catch((e) => bad(e.message))
   res.json(core.sendMessage({ chatId: chat.id, text: str(req.body.text, 'text'), sentBy: sentBy(req), senderName: req.actor!.name }).message)
 })
+api.post('/messages/:id/flag', (req, res) => res.json(need(core.setFlag(req.params.id, req.body.flagged !== false), 'Message not found')))
 api.get('/media/:id', (req, res) => {
   const m = need(core.getMessage(req.params.id))
   if (!m.media_path || !fs.existsSync(m.media_path)) throw new HttpError(404, 'No media')
@@ -483,10 +501,10 @@ api.post('/scheduled', (req, res) => {
 api.delete('/scheduled/:id', (req, res) => { db.prepare('DELETE FROM scheduled WHERE id = ?').run(req.params.id); res.json({ ok: true }) })
 
 // ---------- settings & analytics ----------
-api.get('/settings', (_req, res) => res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending') }))
+api.get('/settings', (_req, res) => res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending'), flagging: getSetting('flagging') }))
 api.put('/settings', admin, (req, res) => {
-  for (const k of ['workspace', 'businessHours', 'sending'] as const) if (req.body[k] && typeof req.body[k] === 'object') setSetting(k, req.body[k])
-  res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending') })
+  for (const k of ['workspace', 'businessHours', 'sending', 'flagging'] as const) if (req.body[k] && typeof req.body[k] === 'object') setSetting(k, req.body[k])
+  res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending'), flagging: getSetting('flagging') })
 })
 // ---------- exports ----------
 api.get('/export/:kind', (req, res) => {
@@ -504,12 +522,14 @@ api.get('/export/:kind', (req, res) => {
   res.send([head.join(','), ...rows.map((r) => head.map((h) => cell(r[h])).join(','))].join('\n'))
 })
 
-api.get('/analytics', (_req, res) => {
-  const since = now() - 7 * 86_400_000
+api.get('/analytics', (req, res) => {
+  const span = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 7
+  const since = now() - span * 86_400_000
   const one = (sql: string, ...a: any[]) => (db.prepare(sql).get(...a) as any).n as number
   const msgs = db.prepare(`SELECT chat_id, direction, created_at, sent_by FROM messages WHERE created_at >= ? AND direction != 'note' ORDER BY chat_id, created_at`).all(since) as any[]
   const days: Record<string, { in: number; out: number }> = {}
-  for (let i = 6; i >= 0; i--) days[new Date(now() - i * 86_400_000).toISOString().slice(0, 10)] = { in: 0, out: 0 }
+  const team: Record<string, { sent: number; waits: number[]; chats: Set<string> }> = {}
+  for (let i = span - 1; i >= 0; i--) days[new Date(now() - i * 86_400_000).toISOString().slice(0, 10)] = { in: 0, out: 0 }
   const waits: number[] = []
   const byAgent: Record<string, number> = {}
   let waitingSince: number | null = null, lastChat = ''
@@ -519,6 +539,8 @@ api.get('/analytics', (_req, res) => {
     if (day) day[m.direction === 'in' ? 'in' : 'out']++
     if (m.direction === 'in') waitingSince ??= m.created_at
     else {
+      const human = m.sent_by?.startsWith('user:') ? m.sent_by.slice(5) : null
+      if (human) { const t = (team[human] ??= { sent: 0, waits: [], chats: new Set() }); t.sent++; t.chats.add(m.chat_id); if (waitingSince != null) t.waits.push(m.created_at - waitingSince) }
       if (waitingSince != null) { waits.push(m.created_at - waitingSince); waitingSince = null }
       const who = m.sent_by?.startsWith('user:') ? m.sent_by.slice(5) : m.sent_by?.split(':')[0] || 'other'
       byAgent[who] = (byAgent[who] || 0) + 1
@@ -526,7 +548,21 @@ api.get('/analytics', (_req, res) => {
   }
   const names = Object.fromEntries((db.prepare('SELECT id, name FROM users').all() as any[]).map((u) => [u.id, u.name]))
   waits.sort((a, b) => a - b)
+  const tickets = db.prepare('SELECT status, assignee_id, created_at, updated_at FROM tickets').all() as any[]
+  const allUsers = db.prepare('SELECT id, name FROM users ORDER BY name').all() as any[]
+  const avg = (a: number[]) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length / 1000) : null)
+  const resolved = tickets.filter((t) => t.status === 'resolved')
   res.json({
+    days: span, flagged_messages: one('SELECT COUNT(*) n FROM messages WHERE flagged = 1'),
+    team: allUsers.map((u) => ({
+      id: u.id, name: u.name, sent: team[u.id]?.sent || 0, chats: team[u.id]?.chats.size || 0, avg_response_seconds: avg(team[u.id]?.waits || []),
+      open_chats: one(`SELECT COUNT(*) n FROM chats WHERE status = 'open' AND assignee_id = ?`, u.id),
+      tickets_open: tickets.filter((t) => t.assignee_id === u.id && t.status !== 'resolved').length, tickets_resolved: tickets.filter((t) => t.assignee_id === u.id && t.status === 'resolved').length,
+    })),
+    tickets: {
+      total: tickets.length, open: tickets.filter((t) => t.status === 'open').length, in_progress: tickets.filter((t) => t.status === 'in_progress').length, resolved: resolved.length,
+      unassigned: tickets.filter((t) => !t.assignee_id && t.status !== 'resolved').length, avg_resolution_seconds: avg(resolved.map((t) => t.updated_at - t.created_at)),
+    },
     open_chats: one(`SELECT COUNT(*) n FROM chats WHERE status = 'open'`), unread_chats: one('SELECT COUNT(*) n FROM chats WHERE unread > 0'),
     unassigned_chats: one(`SELECT COUNT(*) n FROM chats WHERE status = 'open' AND assignee_id IS NULL`),
     open_tickets: one(`SELECT COUNT(*) n FROM tickets WHERE status != 'resolved'`), automations_run: one('SELECT COUNT(*) n FROM automation_runs WHERE created_at >= ?', since),

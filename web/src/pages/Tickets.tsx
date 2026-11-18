@@ -13,22 +13,23 @@ export default function Tickets() {
   const run = useAction()
   const tickets = useData<any[]>('/tickets')
   const [draft, setDraft] = useState<any>(null)
+  const [over, setOver] = useState('')
   useLive((e) => { if (e.startsWith('ticket.')) tickets.reload() })
   const update = (id: string, patch: any) => run(() => api('PATCH', `/tickets/${id}`, patch)).then(tickets.reload)
 
   return (
-    <Page title="Tickets" subtitle="Track customer requests to done. Create them from any chat, by automation, by the AI agent, or through the API."
+    <Page title="Tickets" subtitle="Track customer requests to done. Drag a card between columns to change its status. Tickets come from any chat, automations, the AI agent or the API."
       actions={<button className="btn btn-primary" onClick={() => setDraft({ title: '', description: '', priority: 'medium' })}><Plus size={16} />New ticket</button>}>
       {tickets.data?.length === 0 ? <Empty icon={<Ticket size={22} />} title="No tickets yet" hint="Open a chat and create a ticket from the details panel, or add an automation that creates them from keywords." /> : (
         <div className="grid gap-4 md:grid-cols-3">
           {COLUMNS.map(([status, label]) => {
             const items = tickets.data?.filter((t) => t.status === status) || []
             return (
-              <div key={status} data-testid={`column-${status}`}>
+              <div key={status} data-testid={`column-${status}`} onDragOver={(e) => { e.preventDefault(); setOver(status) }} onDragLeave={() => setOver('')} onDrop={(e) => { e.preventDefault(); setOver(''); const tid = e.dataTransfer.getData('text/ticket'); if (tid) update(tid, { status }) }} className={`rounded-xl p-1 transition-colors ${over === status ? 'bg-brand-50 ring-2 ring-brand-500' : ''}`}>
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600">{label}<span className="rounded-full bg-slate-200 px-1.5 text-xs">{items.length}</span></div>
                 <div className="space-y-2">
                   {items.map((t) => (
-                    <div key={t.id} className="card p-3 text-sm" data-testid="ticket-card">
+                    <div key={t.id} className="card cursor-grab p-3 text-sm active:cursor-grabbing" data-testid="ticket-card" draggable onDragStart={(e) => e.dataTransfer.setData('text/ticket', t.id)}>
                       <div className="flex items-start justify-between gap-2"><div className="font-medium">#{t.seq} {t.title}</div><button className="btn btn-danger !p-1" aria-label={`Delete ticket ${t.seq}`} onClick={() => confirm('Delete this ticket?') && run(() => api('DELETE', `/tickets/${t.id}`)).then(tickets.reload)}><Trash2 size={13} /></button></div>
                       {t.description && <div className="mt-1 line-clamp-2 text-slate-500">{t.description}</div>}
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
