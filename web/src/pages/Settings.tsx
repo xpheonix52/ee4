@@ -16,6 +16,7 @@ export default function Settings() {
   const [user, setUser] = useState({ name: '', email: '', password: '', role: 'agent' })
   const [label, setLabel] = useState({ name: '', color: '#2563eb' })
   const [qr, setQr] = useState({ shortcut: '', text: '' })
+  const [pw, setPw] = useState({ current: '', password: '' })
   useEffect(() => { if (saved.data && !s) setS(saved.data) }, [saved.data, s])
   const admin = me.role === 'admin'
   if (!s) return <Page title="Settings">{null}</Page>
@@ -52,6 +53,16 @@ export default function Settings() {
             <Field label="Broadcast messages per number per day"><input className="input" type="number" min={1} disabled={!admin} value={s.sending.broadcastDailyLimit} onChange={(e) => upd('sending', { broadcastDailyLimit: Number(e.target.value) })} /></Field>
           </div>
           {admin && <button className="btn btn-primary" onClick={save}>Save settings</button>}
+        </section>
+
+        <section className="card p-5">
+          <h2 className="font-medium">Your account</h2>
+          <p className="text-sm text-slate-500">Signed in as {me.name} ({me.email}) · {me.role === 'admin' ? 'Admin' : 'Agent'}. Change your password here, for example after an admin gave you a temporary one.</p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <input className="input" type="password" autoComplete="current-password" placeholder="Current password" aria-label="Current password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} />
+            <input className="input" type="password" autoComplete="new-password" placeholder="New password (8+ characters)" aria-label="New password" value={pw.password} onChange={(e) => setPw({ ...pw, password: e.target.value })} />
+            <button className="btn btn-outline" disabled={!pw.current || pw.password.length < 8} onClick={async () => { if (await run(() => api('POST', '/me/password', pw), 'Password changed')) setPw({ current: '', password: '' }) }}>Change password</button>
+          </div>
         </section>
 
         <section className="card space-y-3 p-5">

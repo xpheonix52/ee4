@@ -34,6 +34,18 @@ test('setup, sign-in and access control', async () => {
   assert.equal((await agent.req('GET', '/api-keys')).status, 403)
   assert.equal((await agent.req('POST', '/numbers', { name: 'x', kind: 'sandbox' })).status, 403)
   assert.equal((await agent.req('GET', '/chats')).status, 200)
+  // A teammate replaces the temporary password; the old one stops working and a second admin can be added.
+  assert.equal((await agent.req('POST', '/me/password', { current: 'wrong', password: 'brand-new-pass' })).status, 400)
+  await agent.ok('POST', '/me/password', { current: 'password123', password: 'brand-new-pass' })
+  assert.equal((await new App(app.port, app.dataDir).req('POST', '/auth/login', { email: 'agent@test.dev', password: 'password123' })).status, 401)
+  await agent.ok('POST', '/me/password', { current: 'brand-new-pass', password: 'password123' })
+  await new App(app.port, app.dataDir).ok('POST', '/auth/login', { email: 'agent@test.dev', password: 'password123' })
+  await app.ok('POST', '/users', { name: 'Dev', email: 'dev@test.dev', password: 'password123', role: 'admin' })
+  const dev = new App(app.port, app.dataDir)
+  await dev.ok('POST', '/auth/login', { email: 'dev@test.dev', password: 'password123' })
+  assert.equal((await dev.req('GET', '/api-keys')).status, 200)
+  await app.ok('DELETE', `/users/${(await app.ok('GET', '/users')).find((u: any) => u.email === 'dev@test.dev').id}`)
+  assert.equal((await dev.req('GET', '/chats')).status, 401, 'a removed teammate is signed out at once')
 })
 
 test('inbox: receive, reply, notes, labels, assignment', async () => {

@@ -107,7 +107,7 @@ api.use(requireAuth)
 
 // Audit trail: who changed what. Chat traffic and AI test calls are left out to keep it readable.
 api.use((req, res, next) => {
-  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !/\/(messages|notes|read|simulate|simulate-reaction|test|check|assistant|draft|summary|rewrite|flag)(\/|$)/.test(req.path) && !/^\/chats\//.test(req.path)) {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !/\/(messages|notes|read|simulate|simulate-reaction|test|check|assistant|draft|summary|rewrite|flag|password)(\/|$)/.test(req.path) && !/^\/chats\//.test(req.path)) {
     res.on('finish', () => {
       if (res.statusCode >= 400) return
       const [, resource, , sub] = req.path.split('/')
@@ -125,6 +125,19 @@ api.get('/audit', admin, (_req, res) => res.json(db.prepare('SELECT * FROM audit
 api.get('/me', (req, res) => {
   const user = req.actor!.type === 'user' ? publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.actor!.id)) : { id: req.actor!.id, name: req.actor!.name, role: 'admin', api_key: true }
   res.json({ user, workspace: getSetting('workspace'), ai_configured: aiConfigured() })
+})
+
+/** Anyone can change their own password, so a temporary one handed out by an admin does not have to stay. */
+api.post('/me/password', (req, res) => {
+  if (req.actor!.type !== 'user') bad('API keys do not have a password')
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.actor!.id) as any
+  if (!verifyPassword(String(req.body.current || ''), u.password_hash)) bad('Your current password is not correct')
+  const next = String(req.body.password || '')
+  if (next.length < 8) bad('The new password must be at least 8 characters')
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), u.id)
+  // Sign out every other device that was using the old password.
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(u.id, req.cookies?.sb_session || '')
+  res.json({ ok: true })
 })
 
 // ---------- live events ----------
