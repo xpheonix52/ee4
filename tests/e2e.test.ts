@@ -239,8 +239,15 @@ test('self-training learns from a teammate, and the assistant works across the w
   // Inbox extras: needs-reply filter, custom properties, ticket straight from a message.
   await customer('Is my warranty still valid?', '15557004', 'Quinn')
   await nav('Inbox')
+  // Maya asked last and nobody answered; Quinn was answered by the agent, so only Maya is waiting on us.
   await page.getByRole('button', { name: 'Needs reply' }).click()
+  await page.getByTestId('chat-list').getByText('Maya', { exact: true }).waitFor()
+  await page.getByTestId('messages').getByText(/ANSWER/).first().waitFor().catch(() => {})
+  await page.getByRole('button', { name: 'All', exact: true }).click()
   await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).click()
+  await page.getByTestId('messages').getByText(/ANSWER/).first().waitFor()
+  await page.getByRole('button', { name: 'Needs reply' }).click()
+  await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).waitFor({ state: 'detached' })
   await page.getByLabel('Property name').fill('plan')
   await page.getByLabel('Property value').fill('Gold')
   await page.getByRole('button', { name: 'Set', exact: true }).click()

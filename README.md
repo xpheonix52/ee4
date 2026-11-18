@@ -19,6 +19,11 @@ Everything (database, WhatsApp logins, media) is stored in the `switchboard-data
 The server must stay on: a WhatsApp link is a live connection. Put it behind HTTPS (Caddy, nginx,
 Cloudflare Tunnel) and then set `COOKIE_SECURE=true` and `TRUST_PROXY=1` in `docker-compose.yml`.
 
+**Hosted option:** `render.yaml` is a Render blueprint (New > Blueprint > this repo) that builds the
+Dockerfile and attaches a persistent disk. Any host that runs a Docker container with a volume works
+(Railway, Fly.io, a VPS). Static hosts such as Netlify or Vercel cannot run it: the app is a long-running
+server that holds live WhatsApp connections.
+
 Without Docker: `npm ci && npm run build && npm start` (Node 22+). For development: `npm run dev`.
 
 | Variable | Default | Purpose |
@@ -41,10 +46,25 @@ Without Docker: `npm ci && npm run build && npm start` (Node 22+). For developme
   assign, create ticket, note, HTTP request, toggle the agent, close chat, wait. Text fields accept
   variables such as `{{message.text}}`, `{{contact.name}}`, `{{ai.output}}`, `{{http.json.id}}`,
   `{{webhook.order}}`. Templates included; every run is logged.
-- **AI agent**: answers from the knowledge hub, creates tickets, labels chats and hands off to a person.
-  Works with Claude (Anthropic) or any OpenAI-compatible endpoint (OpenAI, OpenRouter, Groq, Ollama…).
-  Add external MCP servers and the agent can use their tools.
-- **Knowledge hub**: paste text, import a web page or upload a file; full-text search (SQLite FTS5).
+- **AI agent**: answers from the knowledge hub, creates tickets, writes private notes, labels chats and
+  hands off to a person. Works with Claude (Anthropic) or any OpenAI-compatible endpoint (OpenAI,
+  OpenRouter, Groq, Ollama…).
+  - *Persona*: name, personality preset (friendly, strict grounded, spartan, sales forward), role and
+    instructions, hard restrictions, hand-off message.
+  - *When it replies*: per number and per chat, active hours, a wait that lets a teammate answer first,
+    a quiet period after a teammate replies, plain-language activation rules, internal contacts.
+  - *Tools*: switch built-in abilities on or off (including a silent mode that drafts into notes),
+    custom HTTP tools with auth and typed parameters, and MCP connectors with per-tool switches.
+  - *Training*: FAQs with question variations and handling instructions, documents, and weekly
+    self-training that drafts FAQs from your team's real answers (with review before use).
+  - *Logs*: every reply, skipped message and tool call. *Playground*: multi-turn test chat.
+- **Assistant**: a workspace assistant for the team. Ask it to find chats, bulk-label or assign, update
+  tickets, audit the knowledge hub or build automations. It uses the same tools as the MCP server.
+- **Knowledge hub**: FAQs plus documents (paste text, import a web page, upload PDF or text files);
+  full-text search (SQLite FTS5). Feed it from outside with `POST /api/v1/knowledge`, `POST /api/v1/faqs`
+  or the `add_knowledge` / `add_faq` MCP tools.
+- **Also**: custom chat properties (visible to the agent and usable in automations), emoji ticketing
+  (react to a message to raise a ticket), a "Needs reply" inbox view, tickets from any message, CSV exports.
 - **Broadcasts and scheduled messages**: one-off or repeating, paced with random delays and a daily cap.
 - **API and MCP**: REST API under `/api/v1`, signed outgoing webhooks, live event stream, and an MCP
   server at `/mcp` (Streamable HTTP). One API key works for both. The in-app **API & MCP** page has
@@ -63,9 +83,9 @@ after 8 automated messages in a row in one chat, to break bot-to-bot loops.
 npm run qa   # typecheck, backend suite, then a browser bot that drives the real UI
 ```
 
-- `tests/api.test.ts`: 14 scenarios against a real server process, with scripted customers on a sandbox
+- `tests/api.test.ts`: 15 scenarios against a real server process, with scripted customers on a sandbox
   number, mock LLM providers (OpenAI-style and Anthropic), a mock CRM, a webhook receiver and an MCP client.
-- `tests/e2e.test.ts`: 11 browser scenarios (Playwright) from first-run setup to a teammate signing in,
+- `tests/e2e.test.ts`: 12 browser scenarios (Playwright) from first-run setup to a teammate signing in,
   including a phone-sized viewport and a zero-console-errors check.
 - `npx tsx tests/wa-probe.ts`: checks that this machine can reach WhatsApp and obtain a pairing QR.
 
