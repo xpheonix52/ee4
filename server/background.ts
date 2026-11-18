@@ -2,7 +2,8 @@ import crypto from 'node:crypto'
 import { db, id, now } from './db.js'
 import { bus, type AppEvent } from './bus.js'
 import { sendMessage } from './core.js'
-import { buildContext, executeAutomation, listAutomations, localNow, runAutomations } from './automations.js'
+import { buildContext, executeAutomation, listAutomations, localNow, runAutomations, runTimedAutomations } from './automations.js'
+import { addNote, updateChat } from './core.js'
 import { maybeAutoReply, snoozeAgent } from './ai.js'
 import { maybeScheduledTraining } from './training.js'
 
@@ -62,6 +63,13 @@ export async function tick() {
       try { sendMessage({ chatId, text: s.text, sentBy: `${chatIds.length > 1 ? 'broadcast' : 'scheduled'}:${s.id}`, senderName: s.name || 'Scheduled' }) } catch { /* chat was deleted */ }
     }
   }
+  // Follow-up reminders a teammate set on a chat: bring it back to the top with a note.
+  for (const c of db.prepare('SELECT id, follow_up_note FROM chats WHERE follow_up_at IS NOT NULL AND follow_up_at <= ? AND follow_up_notified = 0').all(now()) as any[]) {
+    db.prepare('UPDATE chats SET follow_up_notified = 1, unread = unread + 1, last_message_at = ? WHERE id = ?').run(now(), c.id)
+    addNote(c.id, `Follow-up reminder${c.follow_up_note ? `: ${c.follow_up_note}` : ''}`, 'Reminder')
+    updateChat(c.id, {})
+  }
+  await runTimedAutomations()
   maybeScheduledTraining().catch((e) => console.error('[training] failed', e))
   const local = localNow()
   const hhmm = local.toISOString().slice(11, 16)

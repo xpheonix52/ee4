@@ -506,6 +506,45 @@ test('robustness: cooldown bursts, bot loops, broken rules, renamed chats', asyn
   assert.equal((await app.ok('GET', `/chats/${pat.id}`)).name, 'Pat (VIP, Acme)')
 })
 
+test('monitoring: unanswered chats, quiet customers, follow-up reminders, message search', async () => {
+  // A new workspace starts with monitoring in place; only the rule that never messages customers is on.
+  const starters = (await app.ok('GET', '/automations')).filter((a: any) => /^(Flag chats waiting|Follow up when|Away message|Close chats after)/.test(a.name))
+  assert.equal(starters.length, 4); assert.deepEqual(starters.filter((a: any) => a.enabled).map((a: any) => a.name), ['Flag chats waiting over 30 minutes'])
+  assert.equal((await app.req('POST', '/automations', { name: 'x', trigger: { type: 'chat.waiting' }, actions: [{ type: 'add_note', text: 'x' }] })).status, 400)
+
+  // Customer waiting with no answer: fires once, not on every scheduler pass.
+  const sla = await app.ok('POST', '/automations', { name: 'SLA', trigger: { type: 'chat.waiting', minutes: 0.005 }, conditions: [{ field: 'message.text', op: 'contains', value: 'sla-check' }], actions: [{ type: 'add_label', label: 'Overdue' }, { type: 'add_note', text: 'Waiting: {{message.text}}' }] })
+  await simulate('sla-check please help', '15550080', 'Vic')
+  const vic = await until(() => chatByPhone('15550080'), 'chat')
+  await until(async () => (await app.ok('GET', `/chats/${vic.id}`)).labels.some((l: any) => l.name === 'Overdue'), 'waiting trigger')
+  await sleep(800)
+  assert.equal((await app.ok('GET', `/automations/${sla.id}/runs`)).length, 1)
+  await app.ok('PUT', `/automations/${sla.id}`, { enabled: false })
+
+  // We answered and the customer went quiet: one follow-up, which does not trigger itself again.
+  const quiet = await app.ok('POST', '/automations', { name: 'Nudge', trigger: { type: 'chat.quiet', hours: 0.0001 }, conditions: [{ field: 'contact.phone', op: 'equals', value: '15550080' }], actions: [{ type: 'send_message', text: 'Just checking in, {{contact.name}}.' }] })
+  await app.ok('POST', `/chats/${vic.id}/messages`, { text: 'Fixed it for you.' })
+  await until(async () => (await outbound(vic.id)).some((m: any) => m.text === 'Just checking in, Vic.'), 'quiet trigger')
+  await sleep(1200)
+  assert.equal((await outbound(vic.id)).filter((m: any) => /checking in/.test(m.text)).length, 1)
+  await app.ok('PUT', `/automations/${quiet.id}`, { enabled: false })
+
+  // Follow-up reminder: when it is due, the chat comes back with a note and an unread mark.
+  await app.ok('POST', `/chats/${vic.id}/read`)
+  const set = await app.ok('PATCH', `/chats/${vic.id}`, { follow_up_at: new Date(Date.now() + 400).toISOString(), follow_up_note: 'Send the quote' })
+  assert.ok(set.follow_up_at > Date.now())
+  assert.deepEqual((await app.ok('GET', '/chats?follow_up=true')).map((c: any) => c.id), [vic.id])
+  await until(async () => (await messages(vic.id)).some((m: any) => m.direction === 'note' && m.text === 'Follow-up reminder: Send the quote'), 'reminder note')
+  assert.equal((await app.ok('GET', `/chats/${vic.id}`)).unread, 1)
+  await sleep(500)
+  assert.equal((await messages(vic.id)).filter((m: any) => /Follow-up reminder/.test(m.text)).length, 1)
+  assert.equal((await app.ok('PATCH', `/chats/${vic.id}`, { follow_up_at: null })).follow_up_at, null)
+  assert.equal((await app.ok('GET', '/chats?follow_up=true')).length, 0)
+
+  // Search looks inside message history, not just names.
+  assert.deepEqual((await app.ok('GET', '/chats?q=Fixed it for you')).map((c: any) => c.id), [vic.id])
+})
+
 test('data survives a restart', async () => {
   // A slow broadcast must not hold up a teammate's reply, and whatever is unsent at shutdown is flagged, not lost silently.
   const [x, y] = [await chatByPhone('15550020'), await chatByPhone('15550030')]

@@ -89,6 +89,9 @@ function addColumn(table: string, column: string, ddl: string) {
 addColumn('chats', 'props', `TEXT NOT NULL DEFAULT '{}'`)
 addColumn('chats', 'internal', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('chats', 'ai_snooze_until', 'INTEGER')
+addColumn('chats', 'follow_up_at', 'INTEGER')
+addColumn('chats', 'follow_up_note', 'TEXT')
+addColumn('chats', 'follow_up_notified', 'INTEGER NOT NULL DEFAULT 0')
 addColumn('mcp_servers', 'disabled_tools', `TEXT NOT NULL DEFAULT '[]'`)
 
 export const now = () => Date.now()

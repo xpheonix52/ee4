@@ -8,7 +8,7 @@ import * as kb from './knowledge.js'
 import { SandboxTransport } from './wa.js'
 import { agentReply, aiConfig, assistant, generate, aiConfigured, listModels, playground, runModel, PERSONALITIES } from './ai.js'
 import { runTraining } from './training.js'
-import { automationView, buildContext, executeAutomation, getAutomation, listAutomations, saveAutomation, TRIGGERS } from './automations.js'
+import { buildContext, executeAutomation, getAutomation, listAutomations, saveAutomation, seedStarterAutomations, TRIGGERS } from './automations.js'
 import { forgetServer, listServerTools } from './mcpClient.js'
 
 type Actor = { type: 'user' | 'api'; id: string; name: string; role: string }
@@ -66,6 +66,7 @@ api.post('/setup', (req, res) => {
   const userId = id('usr')
   db.prepare('INSERT INTO users(id, email, name, password_hash, role, created_at) VALUES(?,?,?,?,?,?)').run(userId, email, name, hashPassword(password), 'admin', now())
   if (req.body.workspace) setSetting('workspace', { name: String(req.body.workspace), timezoneOffsetMinutes: Number(req.body.timezoneOffsetMinutes) || 0 })
+  seedStarterAutomations()
   startSession(res, userId)
   res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(userId)) })
 })
@@ -192,7 +193,7 @@ api.post('/numbers/:id/simulate', (req, res) => {
 // ---------- chats & messages ----------
 api.get('/chats', (req, res) => {
   const q = req.query as Record<string, string>
-  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, needs_reply: q.needs_reply === 'true', status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
+  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, needs_reply: q.needs_reply === 'true', follow_up: q.follow_up === 'true', status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
 })
 api.get('/chats/:id', (req, res) => res.json(need(core.getChat(req.params.id), 'Chat not found')))
 api.patch('/chats/:id', (req, res) => {
@@ -214,6 +215,17 @@ api.post('/chats/:id/messages', upload.single('file'), (req, res) => {
 })
 api.post('/chats/:id/notes', (req, res) => { need(core.getChat(req.params.id), 'Chat not found'); res.json(core.addNote(req.params.id, str(req.body.text, 'text'), req.actor!.name)) })
 api.post('/chats/:id/ai/draft', async (req, res) => res.json({ text: (await agentReply(need(core.getChat(req.params.id), 'Chat not found').id, { dryRun: true })).text }))
+api.post('/chats/:id/ai/rewrite', async (req, res) => {
+  const chat = need(core.getChat(req.params.id), 'Chat not found')
+  const styles: Record<string, string> = {
+    polish: 'Fix grammar and spelling and make it read naturally. Keep the meaning and length.',
+    shorter: 'Make it shorter and more direct without losing any information.',
+    friendlier: 'Make it warmer and friendlier while staying professional.',
+    translate: 'Translate it into the language the customer has been writing in. If it is already in that language, return it unchanged.',
+  }
+  const style = styles[String(req.body.style)] ?? bad('style must be polish, shorter, friendlier or translate')
+  res.json({ text: await generate(`Rewrite this draft reply to the customer. ${style} Return only the rewritten message.\n\nDraft:\n${str(req.body.text, 'text')}`, { chatId: chat.id }) })
+})
 api.post('/chats/:id/ai/summary', async (req, res) => {
   const chat = need(core.getChat(req.params.id), 'Chat not found')
   res.json({ text: await generate('Summarize this conversation in 3 short bullet points, then list any open action items.', { chatId: chat.id }) })
@@ -273,6 +285,8 @@ api.delete('/tickets/:id', (req, res) => { db.prepare('DELETE FROM tickets WHERE
 function validAutomation(b: any) {
   if (b.trigger && !(TRIGGERS as readonly string[]).includes(b.trigger.type)) bad(`trigger.type must be one of ${TRIGGERS.join(', ')}`)
   if (b.trigger?.type === 'schedule' && !/^\d\d:\d\d$/.test(b.trigger.time || '')) bad('Scheduled automations need a time (HH:MM)')
+  if (b.trigger?.type === 'chat.waiting' && !(Number(b.trigger.minutes) > 0)) bad('Say after how many minutes without a reply this should run')
+  if (b.trigger?.type === 'chat.quiet' && !(Number(b.trigger.hours) > 0)) bad('Say after how many hours of silence this should run')
   if (b.actions && (!Array.isArray(b.actions) || !b.actions.length)) bad('Add at least one action')
   if (b.conditions && !Array.isArray(b.conditions)) bad('conditions must be a list')
   for (const c of b.conditions || []) if (!c || typeof c.field !== 'string' || typeof c.op !== 'string') bad('Each condition needs a field and an operator')

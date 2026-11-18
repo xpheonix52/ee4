@@ -4,11 +4,11 @@ import { emit, type AppEvent } from './bus.js'
 import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat, updateTicket } from './core.js'
 import { agentReply, generate } from './ai.js'
 
-export const TRIGGERS = ['message.received', 'message.sent', 'message.reaction', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
+export const TRIGGERS = ['message.received', 'message.sent', 'message.reaction', 'chat.waiting', 'chat.quiet', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
 export type Condition = { field: string; op: string; value?: string }
 export type Action = { type: string; [k: string]: any }
 export type Automation = {
-  id: string; name: string; enabled: boolean; trigger: { type: string; time?: string; days?: number[] }
+  id: string; name: string; enabled: boolean; trigger: { type: string; time?: string; days?: number[]; minutes?: number; hours?: number }
   conditions: Condition[]; match: 'all' | 'any'; actions: Action[]; cooldown_minutes: number; hook_token: string; run_count: number; created_at: number
 }
 
@@ -196,4 +196,43 @@ export async function runAutomations(evt: AppEvent) {
     }
   }
   return replied
+}
+
+/**
+ * Time-based triggers, checked by the scheduler:
+ *  - chat.waiting: the customer wrote last and nobody has answered for N minutes.
+ *  - chat.quiet:   we wrote last and the customer has been silent for N hours.
+ * Each fires once per "last message", so nothing repeats until the conversation moves on.
+ */
+export async function runTimedAutomations() {
+  for (const auto of listAutomations()) {
+    if (!auto.enabled || (auto.trigger.type !== 'chat.waiting' && auto.trigger.type !== 'chat.quiet')) continue
+    const waiting = auto.trigger.type === 'chat.waiting'
+    const ms = waiting ? (Number(auto.trigger.minutes) || 30) * 60_000 : (Number(auto.trigger.hours) || 24) * 3_600_000
+    const rows = db.prepare(`
+      SELECT m.* FROM chats c JOIN messages m ON m.id = (SELECT id FROM messages WHERE chat_id = c.id AND direction != 'note' ORDER BY created_at DESC, rowid DESC LIMIT 1)
+      WHERE c.status = 'open' AND c.internal = 0 AND m.direction = ? AND m.status != 'failed' AND m.created_at <= ? AND m.created_at >= ?
+        AND COALESCE(m.sent_by, '') != ?
+        AND NOT EXISTS (SELECT 1 FROM automation_runs r WHERE r.automation_id = ? AND r.chat_id = c.id AND r.created_at >= m.created_at)
+      LIMIT 50`).all(waiting ? 'in' : 'out', now() - ms, Math.max(auto.created_at - ms, now() - 30 * 86_400_000), `automation:${auto.id}`, auto.id) as any[]
+    for (const m of rows) {
+      try {
+        const ctx = buildContext({ message: m })
+        const results = auto.conditions.map((c) => test(c, ctx))
+        if (results.length && !(auto.match === 'any' ? results.some(Boolean) : results.every(Boolean))) continue
+        await executeAutomation(auto, ctx, `${waiting ? 'waiting for a reply' : 'customer went quiet'}: ${ctx.chat?.name || ''}`)
+      } catch (e) { console.error(`[automation] "${auto.name}" crashed`, e) }
+    }
+  }
+}
+
+/** Sensible defaults for a new workspace. Only the one that never messages a customer starts switched on. */
+export function seedStarterAutomations() {
+  const starters: (Partial<Automation> & { name: string })[] = [
+    { name: 'Flag chats waiting over 30 minutes', enabled: true, trigger: { type: 'chat.waiting', minutes: 30 }, conditions: [{ field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'add_label', label: 'Waiting on us' }, { type: 'add_note', text: 'No reply for 30 minutes. Someone please pick this up.' }] },
+    { name: 'Follow up when a customer goes quiet for a day', enabled: false, trigger: { type: 'chat.quiet', hours: 24 }, conditions: [{ field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'send_message', text: 'Hi {{contact.name}}, just checking in. Is there anything else we can help you with?' }] },
+    { name: 'Away message outside business hours', enabled: false, cooldown_minutes: 480, trigger: { type: 'message.received' }, conditions: [{ field: 'time.business_hours', op: 'is_false' }, { field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'send_message', text: 'Thanks for your message! We are closed right now and will reply when we are back.' }] },
+    { name: 'Close chats after 7 quiet days', enabled: false, trigger: { type: 'chat.quiet', hours: 168 }, actions: [{ type: 'set_chat_status', status: 'closed' }] },
+  ]
+  for (const a of starters.reverse()) saveAutomation(a)
 }

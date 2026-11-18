@@ -73,10 +73,15 @@ export function messageView(m: any) {
 export const getChat = (chatId: string) => chatView(db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId))
 export const getMessage = (messageId: string) => db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId) as any
 
-export function listChats(f: { needs_reply?: boolean; q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
+export function listChats(f: { follow_up?: boolean; needs_reply?: boolean; q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
   const where: string[] = []
   const args: any[] = []
-  if (f.q) { where.push('(c.name LIKE ? OR c.phone LIKE ? OR c.last_message_preview LIKE ?)'); args.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`) }
+  if (f.q) {
+    // Names, numbers and the full message history, so "that chat about the invoice" can be found.
+    where.push(`(c.name LIKE ? OR c.phone LIKE ? OR c.last_message_preview LIKE ? OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.text LIKE ?))`)
+    args.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
+  }
+  if (f.follow_up) where.push('c.follow_up_at IS NOT NULL')
   if (f.number_id) { where.push('c.number_id = ?'); args.push(f.number_id) }
   if (f.status) { where.push('c.status = ?'); args.push(f.status) }
   if (f.type) { where.push('c.type = ?'); args.push(f.type) }
@@ -86,7 +91,7 @@ export function listChats(f: { needs_reply?: boolean; q?: string; number_id?: st
   if (f.assignee === 'none') where.push('c.assignee_id IS NULL')
   else if (f.assignee) { where.push('c.assignee_id = ?'); args.push(f.assignee) }
   if (f.label) { where.push('EXISTS (SELECT 1 FROM chat_labels cl WHERE cl.chat_id = c.id AND cl.label_id = ?)'); args.push(f.label) }
-  const sql = `SELECT c.* FROM chats c ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY COALESCE(c.last_message_at, c.created_at) DESC LIMIT ?`
+  const sql = `SELECT c.* FROM chats c ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${f.follow_up ? 'c.follow_up_at ASC' : 'COALESCE(c.last_message_at, c.created_at) DESC'} LIMIT ?`
   return (db.prepare(sql).all(...args, Math.min(f.limit || 200, 500)) as any[]).map(chatView)
 }
 export function listMessages(chatId: string, opts: { before?: number; limit?: number } = {}) {
@@ -117,11 +122,17 @@ export function upsertChat(numberId: string, jid: string, info: { type?: string;
   return { chat: db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId) as any, created: true }
 }
 export function updateChat(chatId: string, patch: Record<string, any>) {
-  const allowed = ['assignee_id', 'status', 'ai_mode', 'name', 'unread', 'props', 'internal', 'ai_snooze_until']
+  const allowed = ['assignee_id', 'status', 'ai_mode', 'name', 'unread', 'props', 'internal', 'ai_snooze_until', 'follow_up_at', 'follow_up_note', 'follow_up_notified']
   patch = { ...patch }
   if (patch.props && typeof patch.props === 'object') patch.props = JSON.stringify(Object.fromEntries(Object.entries(patch.props).filter(([k, v]) => k.trim() && v != null && v !== '').map(([k, v]) => [k.trim(), String(v)])))
   else delete patch.props
   if ('internal' in patch) patch.internal = patch.internal ? 1 : 0
+  if ('follow_up_at' in patch) {
+    const t = patch.follow_up_at ? Number(new Date(patch.follow_up_at)) : NaN
+    patch.follow_up_at = Number.isFinite(t) ? t : null
+    patch.follow_up_notified = 0
+    if (patch.follow_up_at === null) patch.follow_up_note = null
+  }
   const keys = Object.keys(patch).filter((k) => allowed.includes(k))
   if (keys.length) db.prepare(`UPDATE chats SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => patch[k]), chatId)
   const chat = getChat(chatId)
