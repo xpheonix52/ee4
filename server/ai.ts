@@ -11,6 +11,53 @@ type Turn = { role: 'user' | 'assistant'; text: string }
 export type AgentResult = { text: string; trace: { tool: string; input: any; output: string }[] }
 
 export const aiConfigured = () => !!getSetting('ai').apiKey
+
+const KNOWN_HOSTS: [RegExp, string, string][] = [
+  [/^sk-or-/, 'https://openrouter.ai/api/v1', 'OpenRouter'],
+  [/^gsk_/, 'https://api.groq.com/openai/v1', 'Groq'],
+]
+/**
+ * The settings as they will actually be used. The key itself says where it belongs, so a pasted
+ * OpenRouter or Anthropic key works even if the provider or base URL was left on something else.
+ */
+export function aiConfig() {
+  const cfg = { ...getSetting('ai') }
+  let providerName = cfg.provider === 'anthropic' ? 'Anthropic' : 'your AI provider'
+  if (/^sk-ant-/.test(cfg.apiKey)) { cfg.provider = 'anthropic'; providerName = 'Anthropic'; if (/openrouter|openai\.com|groq/.test(cfg.baseUrl)) cfg.baseUrl = '' }
+  else for (const [prefix, url, name] of KNOWN_HOSTS) {
+    if (!prefix.test(cfg.apiKey)) continue
+    cfg.provider = 'openai'; providerName = name
+    if (!cfg.baseUrl || /api\.openai\.com|api\.anthropic\.com/.test(cfg.baseUrl)) cfg.baseUrl = url
+  }
+  if (cfg.provider === 'openai') {
+    cfg.baseUrl = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
+    if (providerName === 'your AI provider') providerName = /openai\.com/.test(cfg.baseUrl) ? 'OpenAI' : /openrouter/.test(cfg.baseUrl) ? 'OpenRouter' : new URL(cfg.baseUrl).host
+  }
+  return { ...cfg, providerName }
+}
+
+/** Models the configured key can use, for the model picker. */
+export async function listModels(): Promise<string[]> {
+  const cfg = aiConfig()
+  const url = cfg.provider === 'anthropic' ? `${(cfg.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/models?limit=1000` : `${cfg.baseUrl}/models`
+  const headers: Record<string, string> = cfg.provider === 'anthropic' ? { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${cfg.apiKey}` }
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const body: any = await res.json()
+  return (body.data || body.models || []).map((m: any) => String(m.id || m.name || '')).filter(Boolean).sort()
+}
+
+/** Turn a provider failure into one sentence a non-developer can act on. */
+function explain(status: number, raw: string, cfg: ReturnType<typeof aiConfig>) {
+  let detail = raw
+  try { const j = JSON.parse(raw); detail = j?.error?.message || j?.message || raw } catch { /* plain text */ }
+  detail = String(detail).replace(/\s+/g, ' ').slice(0, 240)
+  if (status === 401 || status === 403) return `${cfg.providerName} rejected the API key. Check that the whole key was pasted and that it is still active. (${detail})`
+  if (status === 404 || /model/i.test(detail) && status === 400) return `${cfg.providerName} does not have a model called "${cfg.model}". Pick one from the model list. (${detail})`
+  if (status === 402) return `${cfg.providerName} says the account is out of credit. Add credit there and try again. (${detail})`
+  if (status === 429) return `${cfg.providerName} is rate-limiting this key right now. Wait a moment and try again. (${detail})`
+  return `${cfg.providerName} returned an error (HTTP ${status}): ${detail}`
+}
 const MAX_STEPS = 8
 
 async function callTool(tools: Tool[], name: string, input: any, trace: AgentResult['trace']) {
@@ -25,7 +72,7 @@ async function callTool(tools: Tool[], name: string, input: any, trace: AgentRes
 }
 
 async function runAnthropic(system: string, turns: Turn[], tools: Tool[]): Promise<AgentResult> {
-  const cfg = getSetting('ai')
+  const cfg = aiConfig()
   const client = new Anthropic({ apiKey: cfg.apiKey, ...(cfg.baseUrl ? { baseURL: cfg.baseUrl } : {}) })
   const messages: Anthropic.MessageParam[] = turns.map((t) => ({ role: t.role, content: t.text }))
   const trace: AgentResult['trace'] = []
@@ -33,7 +80,7 @@ async function runAnthropic(system: string, turns: Turn[], tools: Tool[]): Promi
     const res = await client.messages.create({
       model: cfg.model, max_tokens: 16000, system, messages,
       ...(tools.length ? { tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema })) } : {}),
-    })
+    }).catch((e: any) => { throw e instanceof Anthropic.APIError && e.status ? new Error(explain(e.status, JSON.stringify(e.error ?? { message: e.message }), cfg)) : e })
     if (res.stop_reason === 'refusal') throw new Error('The model declined to answer this request')
     const text = res.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map((b) => b.text).join('\n').trim()
     const uses = res.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
@@ -48,8 +95,8 @@ async function runAnthropic(system: string, turns: Turn[], tools: Tool[]): Promi
 }
 
 async function runOpenAI(system: string, turns: Turn[], tools: Tool[]): Promise<AgentResult> {
-  const cfg = getSetting('ai')
-  const base = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
+  const cfg = aiConfig()
+  const base = cfg.baseUrl
   const messages: any[] = [{ role: 'system', content: system }, ...turns.map((t) => ({ role: t.role, content: t.text }))]
   const trace: AgentResult['trace'] = []
   for (let step = 0; step < MAX_STEPS; step++) {
@@ -61,7 +108,7 @@ async function runOpenAI(system: string, turns: Turn[], tools: Tool[]): Promise<
       }),
       signal: AbortSignal.timeout(120000),
     })
-    if (!res.ok) throw new Error(`AI provider returned HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`)
+    if (!res.ok) throw new Error(explain(res.status, await res.text(), cfg))
     const msg = ((await res.json()) as any).choices?.[0]?.message
     if (!msg) throw new Error('AI provider returned an empty response')
     const calls: any[] = msg.tool_calls || []
@@ -80,7 +127,7 @@ export async function runModel(system: string, turns: Turn[], tools: Tool[] = []
   if (!aiConfigured()) throw new Error('AI is not configured yet. Add a provider key under AI Agent.')
   while (turns.length && turns[0].role !== 'user') turns = turns.slice(1)
   if (!turns.length) throw new Error('Nothing to respond to')
-  return getSetting('ai').provider === 'openai' ? runOpenAI(system, turns, tools) : runAnthropic(system, turns, tools)
+  return aiConfig().provider === 'openai' ? runOpenAI(system, turns, tools) : runAnthropic(system, turns, tools)
 }
 
 // ---------- persona ----------

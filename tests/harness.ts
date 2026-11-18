@@ -81,7 +81,10 @@ export const hmac = (secret: string, body: string) => `sha256=${crypto.createHma
 
 /** Scripted OpenAI-compatible model: searches knowledge first, hands off when asked for a human. */
 export function openAiMock() {
-  return mockServer(({ body }) => {
+  return mockServer(({ body, url }) => {
+    if (url.endsWith('/models')) return { body: { data: [{ id: 'mock' }, { id: 'vendor/sonnet-8' }, { id: 'vendor/sonnet-9' }, { id: 'vendor/haiku-9' }] } }
+    if (body.model === 'sonnet') return { status: 404, body: { error: { message: 'No endpoints found for sonnet.' } } }
+    if (body.model === 'denied') return { status: 401, body: { error: { message: 'Incorrect API key provided' } } }
     const msgs: any[] = body.messages
     const last = msgs[msgs.length - 1]
     const tools: string[] = (body.tools || []).map((t: any) => t.function.name)

@@ -5,10 +5,15 @@ import { api, dateTime, useData } from '../api'
 import { Field, Modal, Page, Toggle, useAction } from '../ui'
 import { useApp } from '../App'
 
-const PROVIDERS = {
-  anthropic: { label: 'Claude (Anthropic)', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'], keyHint: 'From console.anthropic.com. Starts with sk-ant-.', baseHint: 'Leave empty unless you use a proxy.' },
-  openai: { label: 'OpenAI-compatible', models: [], keyHint: 'Any provider with an OpenAI-style API: OpenAI, OpenRouter, Groq, Together, Ollama, LM Studio…', baseHint: 'For example https://api.openai.com/v1 or http://localhost:11434/v1' },
+const HOSTS = {
+  claude: { label: 'Claude', sub: 'Anthropic', provider: 'anthropic', baseUrl: '', keyHint: 'Create a key at console.anthropic.com. It starts with sk-ant-.' },
+  openrouter: { label: 'OpenRouter', sub: 'One key, hundreds of models', provider: 'openai', baseUrl: 'https://openrouter.ai/api/v1', keyHint: 'Create a key at openrouter.ai/keys. It starts with sk-or-.' },
+  openai: { label: 'OpenAI', sub: 'GPT models', provider: 'openai', baseUrl: 'https://api.openai.com/v1', keyHint: 'Create a key at platform.openai.com. It starts with sk-.' },
+  other: { label: 'Other', sub: 'Groq, Ollama, any OpenAI-style API', provider: 'openai', baseUrl: '', keyHint: 'Any provider with an OpenAI-compatible API. Enter its base URL below.' },
 } as const
+type Host = keyof typeof HOSTS
+const hostOf = (s: any): Host => (s.provider === 'anthropic' ? 'claude' : /openrouter\.ai/.test(s.baseUrl) ? 'openrouter' : !s.baseUrl || /api\.openai\.com/.test(s.baseUrl) ? 'openai' : 'other')
+const hostOfKey = (key: string): Host | null => (/^sk-ant-/.test(key) ? 'claude' : /^sk-or-/.test(key) ? 'openrouter' : null)
 const TABS = [['persona', 'Persona'], ['behavior', 'When it replies'], ['tools', 'Tools'], ['training', 'Training'], ['logs', 'Logs'], ['model', 'Model']] as const
 const ROLE_TEMPLATE = `You are the first line of support for [Company]. [Company] sells [what you sell] to [who buys it].
 
@@ -30,7 +35,6 @@ export default function Agent() {
   const [tab, setTab] = useState<(typeof TABS)[number][0]>('persona')
   useEffect(() => { if (saved.data && !s) setS(saved.data) }, [saved.data, s])
   if (!s) return <Page title="AI Agent">{null}</Page>
-  const p = PROVIDERS[s.provider as keyof typeof PROVIDERS]
   const admin = me.role === 'admin'
   const set = (patch: any) => setS({ ...s, ...patch })
   const save = async () => { const r = await run(() => api('PUT', '/ai/settings', s), 'AI agent settings saved'); if (r) { setS(r); saved.reload(); refresh() } }
@@ -101,25 +105,70 @@ export default function Agent() {
           {tab === 'training' && <Training s={s} set={set} SaveBar={SaveBar} admin={admin} />}
           {tab === 'logs' && <Logs />}
 
-          {tab === 'model' && (
-            <div className="card space-y-4 p-5">
-              <div className="grid grid-cols-2 gap-2">
-                {(Object.keys(PROVIDERS) as (keyof typeof PROVIDERS)[]).map((k) => (
-                  <button key={k} type="button" onClick={() => set({ provider: k, model: k === 'anthropic' ? 'claude-opus-5-5' : s.provider === k ? s.model : '' })} className={`cursor-pointer rounded-xl border p-3 text-left text-sm font-medium ${s.provider === k ? 'border-brand-600 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}>{PROVIDERS[k].label}</button>
-                ))}
-              </div>
-              <Field label="API key" hint={p.keyHint}><input className="input font-mono" type="password" autoComplete="off" value={s.apiKey} onFocus={() => s.apiKey.includes('…') && set({ apiKey: '' })} onChange={(e) => set({ apiKey: e.target.value })} placeholder="Paste your key" /></Field>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Model"><input className="input" list="model-options" value={s.model} onChange={(e) => set({ model: e.target.value })} placeholder={s.provider === 'openai' ? 'e.g. gpt-5 or llama3.1' : ''} /><datalist id="model-options">{p.models.map((m) => <option key={m} value={m} />)}</datalist></Field>
-                <Field label="Base URL" hint={p.baseHint}><input className="input" value={s.baseUrl} onChange={(e) => set({ baseUrl: e.target.value })} placeholder="Default" /></Field>
-              </div>
-              <SaveBar />
-            </div>
-          )}
+          {tab === 'model' && <ModelSetup s={s} set={set} admin={admin} onSaved={(r: any) => { setS(r); saved.reload(); refresh() }} />}
         </div>
         <div className="lg:col-span-2"><Playground ready={!!saved.data?.has_key} /></div>
       </div>
     </Page>
+  )
+}
+
+function ModelSetup({ s, set, admin, onSaved }: { s: any; set: (p: any) => void; admin: boolean; onSaved: (r: any) => void }) {
+  const run = useAction()
+  const [other, setOther] = useState(false)
+  const [models, setModels] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const host: Host = other ? 'other' : hostOf(s)
+  const h = HOSTS[host]
+  const loadModels = () => api('GET', '/ai/models').then((r) => setModels(r.models)).catch(() => {})
+  useEffect(() => { if (s.has_key) loadModels() }, [s.has_key])
+  const pick = (k: Host) => { setOther(k === 'other'); setResult(null); set({ provider: HOSTS[k].provider, baseUrl: k === 'other' ? (hostOf(s) === 'other' ? s.baseUrl : '') : HOSTS[k].baseUrl, ...(k !== host ? { model: k === 'claude' ? 'claude-opus-5-5' : '' } : {}) }) }
+  const onKey = (apiKey: string) => { const k = hostOfKey(apiKey.trim()); if (k && k !== host) { setOther(false); set({ apiKey, provider: HOSTS[k].provider, baseUrl: HOSTS[k].baseUrl, model: k === 'claude' ? 'claude-opus-5-5' : '' }) } else set({ apiKey }) }
+  const saveAndTest = async (model = s.model) => {
+    setBusy(true); setResult(null)
+    const r = await run(() => api('PUT', '/ai/settings', { ...s, model }))
+    if (r) {
+      onSaved(r)
+      await loadModels()
+      setResult(r.model ? await api('POST', '/ai/check', {}).catch((e) => ({ ok: false, error: e.message })) : { ok: false, needsModel: true })
+    }
+    setBusy(false)
+  }
+  const shown = models.filter((m) => !s.model || m.toLowerCase().includes(s.model.toLowerCase())).slice(0, 8)
+  return (
+    <div className="card space-y-5 p-5">
+      <div>
+        <div className="label">1. Where is your AI model?</div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {(Object.keys(HOSTS) as Host[]).map((k) => (
+            <button key={k} type="button" aria-pressed={host === k} onClick={() => pick(k)} className={`cursor-pointer rounded-xl border p-3 text-left ${host === k ? 'border-brand-600 bg-brand-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+              <div className="text-sm font-medium">{HOSTS[k].label}</div><div className="text-xs text-slate-500">{HOSTS[k].sub}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+      <Field label="2. Paste your API key" hint={`${h.keyHint} The right provider is picked automatically from the key.`}>
+        <input className="input font-mono" type="password" autoComplete="off" aria-label="API key" value={s.apiKey} onFocus={() => s.apiKey.includes('…') && set({ apiKey: '' })} onChange={(e) => onKey(e.target.value)} placeholder="Paste your key" />
+      </Field>
+      {host === 'other' && <Field label="Base URL" hint="For example https://api.groq.com/openai/v1 or http://localhost:11434/v1"><input className="input" aria-label="Base URL" value={s.baseUrl} onChange={(e) => set({ baseUrl: e.target.value })} placeholder="https://…/v1" /></Field>}
+      <div>
+        <Field label="3. Choose a model" hint={models.length ? `${models.length} models available with this key. Type to search, for example "sonnet" or "gpt".` : host === 'claude' ? 'claude-opus-5-5 is the most capable; claude-haiku-5-5 is the cheapest.' : 'Save your key first and the list of models will load here.'}>
+          <input className="input" aria-label="Model" value={s.model} onChange={(e) => { set({ model: e.target.value }); setResult(null) }} placeholder={models.length ? 'Search models…' : host === 'openrouter' ? 'e.g. anthropic/claude-sonnet-4.5' : 'Model name'} />
+        </Field>
+        {models.length > 0 && !models.includes(s.model) && shown.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">{shown.map((m) => <button key={m} type="button" className="chip cursor-pointer bg-slate-100 font-mono text-slate-700 hover:bg-brand-100" onClick={() => { set({ model: m }); setResult(null) }}>{m}</button>)}</div>
+        )}
+      </div>
+      {admin ? <button className="btn btn-primary !px-4 !py-2" disabled={busy || !s.apiKey || (host === 'other' && !s.baseUrl)} onClick={() => saveAndTest()}>{busy ? 'Testing the connection…' : 'Save and test'}</button> : <p className="text-xs text-slate-500">Only admins can change these settings.</p>}
+      {result?.ok && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900" role="status"><b>Connected.</b> {result.provider} answered using {result.model}. The agent is ready: try it in the chat on the right.</div>}
+      {result && !result.ok && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">
+          {result.needsModel ? <><b>Key saved.</b> Now choose a model above{models.length ? ' (pick one of the suggestions)' : ''} and press Save and test again.</> : <><b>Not working yet.</b> {result.error}</>}
+          {!!result.suggestions?.length && <div className="mt-2">Did you mean: {result.suggestions.map((m: string) => <button key={m} type="button" className="chip mr-1 mb-1 cursor-pointer bg-white font-mono text-slate-800 hover:bg-brand-100" onClick={() => { set({ model: m }); saveAndTest(m) }}>{m}</button>)}</div>}
+        </div>
+      )}
+    </div>
   )
 }
 

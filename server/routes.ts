@@ -6,7 +6,7 @@ import { bus, type AppEvent } from './bus.js'
 import * as core from './core.js'
 import * as kb from './knowledge.js'
 import { SandboxTransport } from './wa.js'
-import { agentReply, assistant, generate, aiConfigured, playground, PERSONALITIES } from './ai.js'
+import { agentReply, aiConfig, assistant, generate, aiConfigured, listModels, playground, runModel, PERSONALITIES } from './ai.js'
 import { runTraining } from './training.js'
 import { automationView, buildContext, executeAutomation, getAutomation, listAutomations, saveAutomation, TRIGGERS } from './automations.js'
 import { forgetServer, listServerTools } from './mcpClient.js'
@@ -320,14 +320,38 @@ api.put('/knowledge/:id', (req, res) => res.json(need(kb.updateDoc(req.params.id
 api.delete('/knowledge/:id', (req, res) => { kb.deleteDoc(req.params.id); res.json({ ok: true }) })
 
 // ---------- AI ----------
-const maskAi = () => { const a = getSetting('ai'); return { ...a, apiKey: a.apiKey ? `${a.apiKey.slice(0, 6)}…${a.apiKey.slice(-4)}` : '', has_key: !!a.apiKey } }
+const maskAi = () => {
+  const a = getSetting('ai'), e = aiConfig()
+  // The provider and base URL shown are the ones really in use, after reading the key's prefix.
+  return { ...a, provider: e.provider, baseUrl: a.apiKey ? e.baseUrl : a.baseUrl, provider_name: e.providerName, apiKey: a.apiKey ? `${a.apiKey.slice(0, 6)}…${a.apiKey.slice(-4)}` : '', has_key: !!a.apiKey }
+}
 api.get('/ai/settings', (_req, res) => res.json(maskAi()))
 api.put('/ai/settings', admin, (req, res) => {
-  const { apiKey, has_key, ...rest } = req.body || {}
+  const { apiKey, has_key, provider_name, ...rest } = req.body || {}
+  for (const k of ['model', 'baseUrl']) if (typeof rest[k] === 'string') rest[k] = rest[k].trim()
   if (rest.provider && !['anthropic', 'openai'].includes(rest.provider)) bad('provider must be anthropic or openai')
   setSetting('ai', { ...rest, ...(typeof apiKey === 'string' && !apiKey.includes('…') ? { apiKey: apiKey.trim() } : {}) })
   res.json(maskAi())
 })
+api.get('/ai/models', async (_req, res) => {
+  if (!aiConfigured()) return res.json({ models: [] })
+  res.json({ models: await listModels().catch(() => []) })
+})
+/** One tiny real request, so a wrong key or model is caught at setup time with a clear reason. */
+api.post('/ai/check', async (_req, res) => {
+  if (!aiConfigured()) return res.json({ ok: false, error: 'Paste an API key first.' })
+  const cfg = aiConfig()
+  try {
+    const r = await runModel('You are a connection test.', [{ role: 'user', text: 'Reply with the single word: ready' }])
+    res.json({ ok: true, provider: cfg.providerName, model: cfg.model, reply: r.text.slice(0, 80) })
+  } catch (e: any) {
+    const wanted = cfg.model.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    const models = await listModels().catch(() => [] as string[])
+    const suggestions = models.filter((m) => wanted.length && wanted.every((w) => m.toLowerCase().includes(w))).slice(-8).reverse()
+    res.json({ ok: false, provider: cfg.providerName, error: String(e?.message || e), suggestions })
+  }
+})
+
 const turnsOf = (body: any) => {
   const list = Array.isArray(body?.messages) ? body.messages : [{ role: 'user', text: body?.message }]
   const turns = list.filter((m: any) => m && typeof m.text === 'string' && m.text.trim()).map((m: any) => ({ role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const), text: m.text }))

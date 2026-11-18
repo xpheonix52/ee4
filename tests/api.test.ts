@@ -243,6 +243,21 @@ test('training the agent: persona, FAQs, custom tools, activation, self-training
   }
   const logs = () => app.ok('GET', '/ai/logs')
 
+  // Setup help: a wrong model or key is explained in plain words, with models to pick from.
+  assert.deepEqual((await app.ok('GET', '/ai/models')).models, ['mock', 'vendor/haiku-9', 'vendor/sonnet-8', 'vendor/sonnet-9'])
+  assert.equal((await app.ok('POST', '/ai/check', {})).ok, true)
+  await app.ok('PUT', '/ai/settings', { model: ' sonnet ' })
+  const wrongModel = await app.ok('POST', '/ai/check', {})
+  assert.equal(wrongModel.ok, false); assert.match(wrongModel.error, /does not have a model called "sonnet"/); assert.deepEqual(wrongModel.suggestions, ['vendor/sonnet-9', 'vendor/sonnet-8'])
+  await app.ok('PUT', '/ai/settings', { model: 'denied' })
+  assert.match((await app.ok('POST', '/ai/check', {})).error, /rejected the API key/)
+  // The key's prefix decides where requests go, whatever the form was left on.
+  const or = await app.ok('PUT', '/ai/settings', { provider: 'anthropic', baseUrl: '', apiKey: 'sk-or-v1-0123456789abcdef' })
+  assert.equal(or.provider, 'openai'); assert.equal(or.baseUrl, 'https://openrouter.ai/api/v1'); assert.equal(or.provider_name, 'OpenRouter')
+  const ant = await app.ok('PUT', '/ai/settings', { provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-ant-0123456789abcdef' })
+  assert.equal(ant.provider, 'anthropic'); assert.equal(ant.baseUrl, '')
+  await app.ok('PUT', '/ai/settings', { provider: 'openai', apiKey: 'sk-test-secret-123456', baseUrl: `${llm.url}/v1`, model: 'mock' })
+
   // Persona: personality preset, restrictions and contact properties all reach the model.
   await app.ok('PUT', '/ai/settings', { personality: 'spartan', restrictions: 'Never discuss refunds.' })
   const tess = await ask('hello', '15550070')
