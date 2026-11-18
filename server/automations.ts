@@ -159,7 +159,8 @@ export function buildContext(data: any) {
   const chat = data.chat || (data.message?.chat_id ? getChat(data.message.chat_id) : null)
   return {
     message: data.message, chat, ticket: data.ticket, webhook: data.webhook, reaction: data.reaction,
-    contact: { name: data.message?.sender_name || chat?.name, phone: chat?.phone },
+    // The contact is the customer: for a message we sent, that is the chat's name, not the teammate who wrote it.
+    contact: { name: (data.message?.direction === 'in' && data.message.sender_name) || chat?.name, phone: chat?.phone },
     number: chat ? getNumber(chat.number_id) : undefined,
     workspace: getSetting('workspace'), now: new Date().toISOString(),
   }

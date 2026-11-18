@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot, Check, Ticket, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Bot, Check, Ticket, CalendarClock, Wand2, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
 import { api, clock, timeAgo, useData, useLive } from '../api'
 import { Avatar, Empty, Modal, useAction } from '../ui'
 import { useApp } from '../App'
 
-const TABS = [['all', 'All'], ['waiting', 'Needs reply'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
+const TABS = [['all', 'All'], ['waiting', 'Needs reply'], ['followup', 'Follow up'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
 
 export default function Inbox() {
   const { chatId } = useParams()
@@ -22,6 +22,7 @@ export default function Inbox() {
     if (numberId) p.set('number_id', numberId)
     if (tab === 'unread') p.set('unread', 'true')
     if (tab === 'waiting') p.set('needs_reply', 'true')
+    if (tab === 'followup') p.set('follow_up', 'true')
     if (tab === 'mine') p.set('assignee', 'me')
     if (tab === 'unassigned') p.set('assignee', 'none')
     return p.toString()
@@ -36,7 +37,7 @@ export default function Inbox() {
         <div className="space-y-2 border-b border-slate-200 p-3">
           <div className="relative">
             <Search size={15} className="absolute top-2.5 left-2.5 text-slate-400" />
-            <input className="input !pl-8" placeholder="Search chats" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search chats" />
+            <input className="input !pl-8" placeholder="Search chats and messages" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search chats" />
           </div>
           <div className="flex flex-wrap gap-1">
             {TABS.map(([k, label]) => (
@@ -68,8 +69,9 @@ export default function Inbox() {
                   <span className={`truncate text-xs ${c.unread ? 'text-slate-800' : 'text-slate-500'}`}>{c.last_message_preview || 'No messages yet'}</span>
                   {c.unread > 0 && <span className="shrink-0 rounded-full bg-brand-600 px-1.5 text-xs font-medium text-white">{c.unread}</span>}
                 </div>
-                {(c.labels.length > 0 || c.status === 'closed') && (
+                {(c.labels.length > 0 || c.status === 'closed' || c.follow_up_at) && (
                   <div className="mt-1 flex flex-wrap gap-1">
+                    {c.follow_up_at && <span className={`chip ${c.follow_up_at <= Date.now() ? 'bg-red-100 text-red-700' : 'bg-sky-100 text-sky-700'}`}>Follow up {c.follow_up_at <= Date.now() ? 'now' : new Date(c.follow_up_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>}
                     {c.status === 'closed' && <span className="chip bg-slate-100 text-slate-500">Closed</span>}
                     {c.labels.map((l: any) => <span key={l.id} className="chip" style={{ background: `${l.color}1a`, color: l.color }}>{l.name}</span>)}
                   </div>
@@ -99,6 +101,9 @@ function Conversation({ chatId }: { chatId: string }) {
   const [drafting, setDrafting] = useState(false)
   const [details, setDetails] = useState(false)
   const [summary, setSummary] = useState<string | null>(null)
+  const [later, setLater] = useState<string | null>(null)
+  const rewrite = async (style: string) => { if (!style || !text.trim()) return; setDrafting(true); const r = await run(() => api('POST', `/chats/${chatId}/ai/rewrite`, { text, style })); setDrafting(false); if (r?.text) setText(r.text) }
+  const sendLater = async () => { if (await run(() => api('POST', '/scheduled', { chat_ids: [chatId], text: text.trim(), send_at: new Date(later!).toISOString() }), 'Scheduled. See Broadcasts to change or cancel it.')) { setText(''); setLater(null) } }
   const quick = useData<any[]>('/quick-replies').data || []
   const scroller = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -180,8 +185,21 @@ function Conversation({ chatId }: { chatId: string }) {
             <button onClick={() => setMode('note')} className={`flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs font-medium whitespace-nowrap ${mode === 'note' ? 'bg-amber-200 text-amber-900' : 'text-slate-500 hover:bg-slate-100'}`}><StickyNote size={12} />Private note</button>
             <div className="flex-1" />
             <button aria-label="Summarize" className="btn btn-ghost !px-2 !py-1 !text-xs" onClick={async () => { const r = await run(() => api('POST', `/chats/${chatId}/ai/summary`, {})); if (r) setSummary(r.text) }}><FileText size={13} /><span className="hidden sm:inline">Summarize</span></button>
+            {mode === 'reply' && text.trim() && (
+              <select className="cursor-pointer rounded-md border border-slate-200 bg-white px-1.5 py-1 text-xs text-slate-700" aria-label="Rewrite with AI" value="" disabled={drafting} onChange={(e) => rewrite(e.target.value)}>
+                <option value="">Rewrite…</option><option value="polish">Fix grammar</option><option value="shorter">Make shorter</option><option value="friendlier">Make friendlier</option><option value="translate">Translate to their language</option>
+              </select>
+            )}
+            {mode === 'reply' && text.trim() && <button className="btn btn-ghost !px-2 !py-1 !text-xs" onClick={() => setLater(later === null ? '' : null)}><CalendarClock size={13} /><span className="hidden sm:inline">Send later</span></button>}
             <button className="btn btn-ghost !px-2 !py-1 !text-xs" onClick={draft} disabled={drafting}><Sparkles size={13} />{drafting ? 'Drafting…' : 'AI draft'}</button>
           </div>
+          {later !== null && mode === 'reply' && (
+            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2 text-sm">
+              Send this message at <input type="datetime-local" className="input !w-auto !py-1" aria-label="Send at" value={later} onChange={(e) => setLater(e.target.value)} />
+              <button className="btn btn-primary !py-1" disabled={!later || !text.trim()} onClick={sendLater}>Schedule</button>
+              <button className="btn btn-ghost !py-1" onClick={() => setLater(null)}>Cancel</button>
+            </div>
+          )}
           <div className="relative flex items-end gap-2">
             {slash.length > 0 && (
               <div className="card absolute bottom-full left-0 mb-2 w-full max-w-md overflow-hidden shadow-lg">
@@ -293,6 +311,7 @@ function Details({ chat, users, me, patch, setChat, aiDefault, onClose }: any) {
           {users.map((u: any) => <option key={u.id} value={u.id}>{u.name}{u.id === me.id ? ' (you)' : ''}</option>)}
         </select>
       </div>
+      <FollowUp chat={chat} patch={patch} />
       <div>
         <div className="label">AI agent in this chat</div>
         <select className="input" aria-label="AI agent in this chat" value={chat.ai_mode} onChange={(e) => patch({ ai_mode: e.target.value })}>
@@ -353,5 +372,36 @@ function Details({ chat, users, me, patch, setChat, aiDefault, onClose }: any) {
         </div>
       </div>
     </aside>
+  )
+}
+
+/** "When do we get back to this customer?" Sets a reminder that brings the chat back with a note. */
+function FollowUp({ chat, patch }: { chat: any; patch: (p: any) => void }) {
+  const [note, setNote] = useState('')
+  const [custom, setCustom] = useState('')
+  const at = (ms: number) => patch({ follow_up_at: new Date(ms).toISOString(), follow_up_note: note.trim() || null })
+  const tomorrow9 = () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d.getTime() }
+  if (chat.follow_up_at) {
+    const due = chat.follow_up_at <= Date.now()
+    return (
+      <div className={`rounded-lg border p-3 text-sm ${due ? 'border-red-200 bg-red-50' : 'border-sky-200 bg-sky-50'}`} data-testid="follow-up">
+        <div className="font-medium">{due ? 'Follow-up is due' : 'Follow up'} · {new Date(chat.follow_up_at).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>
+        {chat.follow_up_note && <div className="text-slate-600">{chat.follow_up_note}</div>}
+        <button className="btn btn-outline mt-2 !py-1" onClick={() => patch({ follow_up_at: null })}>{due ? 'Mark done' : 'Cancel reminder'}</button>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <div className="label">Remind us to follow up</div>
+      <input className="input mb-1.5 !py-1" placeholder="What for? (optional)" aria-label="Follow-up note" value={note} onChange={(e) => setNote(e.target.value)} />
+      <div className="flex flex-wrap gap-1">
+        <button className="btn btn-outline !px-2 !py-1 !text-xs" onClick={() => at(Date.now() + 3_600_000)}>In 1 hour</button>
+        <button className="btn btn-outline !px-2 !py-1 !text-xs" onClick={() => at(tomorrow9())}>Tomorrow 9am</button>
+        <button className="btn btn-outline !px-2 !py-1 !text-xs" onClick={() => at(Date.now() + 3 * 86_400_000)}>In 3 days</button>
+        <button className="btn btn-outline !px-2 !py-1 !text-xs" onClick={() => at(Date.now() + 7 * 86_400_000)}>Next week</button>
+      </div>
+      <div className="mt-1.5 flex gap-1"><input type="datetime-local" className="input !py-1" aria-label="Custom follow-up time" value={custom} onChange={(e) => setCustom(e.target.value)} /><button className="btn btn-outline !py-1" disabled={!custom} onClick={() => at(new Date(custom).getTime())}>Set</button></div>
+    </div>
   )
 }

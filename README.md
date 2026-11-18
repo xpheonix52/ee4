@@ -63,6 +63,10 @@ Without Docker: `npm ci && npm run build && npm start` (Node 22+). For developme
 - **Knowledge hub**: FAQs plus documents (paste text, import a web page, upload PDF or text files);
   full-text search (SQLite FTS5). Feed it from outside with `POST /api/v1/knowledge`, `POST /api/v1/faqs`
   or the `add_knowledge` / `add_faq` MCP tools.
+- **Monitoring and follow-up**: time-based triggers ("customer has waited N minutes", "customer quiet for N
+  hours"), one-click follow-up reminders on any chat, a Follow up inbox view, 28 templates in 7 categories,
+  and starter automations installed on a new workspace (only the one that never messages customers starts on).
+- **Composer**: send later, AI rewrite (fix grammar, shorter, friendlier, translate), AI draft and summary.
 - **Also**: custom chat properties (visible to the agent and usable in automations), emoji ticketing
   (react to a message to raise a ticket), a "Needs reply" inbox view, tickets from any message, CSV exports.
 - **Broadcasts and scheduled messages**: one-off or repeating, paced with random delays and a daily cap.
@@ -83,7 +87,7 @@ after 8 automated messages in a row in one chat, to break bot-to-bot loops.
 npm run qa   # typecheck, backend suite, then a browser bot that drives the real UI
 ```
 
-- `tests/api.test.ts`: 15 scenarios against a real server process, with scripted customers on a sandbox
+- `tests/api.test.ts`: 16 scenarios against a real server process, with scripted customers on a sandbox
   number, mock LLM providers (OpenAI-style and Anthropic), a mock CRM, a webhook receiver and an MCP client.
 - `tests/e2e.test.ts`: 12 browser scenarios (Playwright) from first-run setup to a teammate signing in,
   including a phone-sized viewport and a zero-console-errors check.

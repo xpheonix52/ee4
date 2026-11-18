@@ -80,6 +80,7 @@ function LinkDevice({ number, onClose }: { number: any; onClose: () => void }) {
         <li>Go to Settings, then Linked devices, then Link a device.</li>
         <li>Scan this code.</li>
       </ol>
+      <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">Brand-new number? Use it normally on the phone for one to two weeks before linking it, and start slowly. WhatsApp is quick to restrict new numbers that suddenly send a lot.</p>
       <div className="flex min-h-64 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 p-4">
         {number.qr ? <img src={number.qr} alt="WhatsApp QR code" className="h-64 w-64" /> : <span className="text-sm text-slate-500">{number.status === 'disconnected' ? 'Disconnected. Close this and press Link device again.' : 'Getting a QR code from WhatsApp…'}</span>}
       </div>

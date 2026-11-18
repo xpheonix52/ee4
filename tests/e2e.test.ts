@@ -41,7 +41,7 @@ test('first run: create the workspace and land on the checklist', async () => {
   await page.getByLabel('Password').fill('correct-horse-1')
   await page.getByRole('button', { name: 'Create workspace' }).click()
   await see('Hi Olivia')
-  await see('Get set up · 0 of 5 done')
+  await see('Get set up · 1 of 5 done') // monitoring automations come pre-installed
   await shot('01-home')
   app.cookie = (await page.context().cookies()).filter((c: any) => c.name === 'sb_session').map((c: any) => `${c.name}=${c.value}`)[0]
   await app.ok('PUT', '/settings', { sending: { minDelayMs: 0, maxDelayMs: 0, broadcastMinDelayMs: 0, broadcastMaxDelayMs: 0 } })
@@ -105,8 +105,15 @@ test('tickets board moves a ticket through its stages', async () => {
 
 test('automations: build one in the UI and watch it answer a customer', async () => {
   await nav('Automations')
-  await page.getByRole('button', { name: 'Browse templates' }).click()
-  await page.getByRole('button', { name: /Start from scratch/ }).click()
+  // A new workspace already monitors unanswered chats; customer-facing starters wait switched off.
+  await page.getByTestId('automation-row').getByText('Flag chats waiting over 30 minutes').waitFor()
+  await see(/1 of 4 switched on/)
+  await page.getByRole('button', { name: 'New automation' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: /Follow up when a customer goes quiet/ }).click()
+  assert.equal(await page.getByLabel('Hours of silence').inputValue(), '24')
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await page.getByRole('button', { name: 'New automation' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: /Start from scratch/ }).click()
   await page.getByLabel('Name').fill('Pricing auto-reply')
   await page.getByRole('button', { name: 'Add condition' }).click()
   await page.getByLabel('Condition value').fill('price, cost')
@@ -120,7 +127,8 @@ test('automations: build one in the UI and watch it answer a customer', async ()
 
   // A template can be used as-is, and the builder reopens with saved values.
   await page.getByRole('button', { name: 'New automation' }).click()
-  await page.getByRole('button', { name: /Create tickets from keywords/ }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Tickets', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: /Create tickets from keywords/ }).click()
   await page.getByRole('button', { name: 'Save automation' }).click()
   await page.getByTestId('automation-row').getByText('Create tickets from keywords').waitFor()
   await page.getByTestId('automation-row').getByText('Pricing auto-reply').click()
@@ -137,7 +145,7 @@ test('automations: build one in the UI and watch it answer a customer', async ()
   await nav('Automations')
   await page.getByRole('button', { name: '1 run', exact: true }).click()
   await see('Succeeded')
-  await page.getByRole('button', { name: 'Close' }).click()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
 })
 
 test('knowledge hub and AI agent: configure, try it, then let it answer on WhatsApp', async () => {
@@ -257,6 +265,16 @@ test('self-training learns from a teammate, and the assistant works across the w
   await page.getByTestId('messages').getByText(/ANSWER/).first().waitFor()
   await page.getByRole('button', { name: 'Needs reply' }).click()
   await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).waitFor({ state: 'detached' })
+  // "When do we follow up?": one click sets a reminder and the chat shows under Follow up.
+  await page.getByLabel('Follow-up note').fill('Send warranty terms')
+  await page.getByRole('button', { name: 'Tomorrow 9am' }).click()
+  await page.getByTestId('follow-up').getByText('Send warranty terms').waitFor()
+  await page.getByRole('button', { name: 'Follow up', exact: true }).click()
+  await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).waitFor()
+  await shot('14-follow-up')
+  await page.getByLabel('Search chats').fill('warranty still valid')
+  await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).waitFor()
+  await page.getByLabel('Search chats').fill('')
   await page.getByLabel('Property name').fill('plan')
   await page.getByLabel('Property value').fill('Gold')
   await page.getByRole('button', { name: 'Set', exact: true }).click()
