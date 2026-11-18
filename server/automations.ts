@@ -1,9 +1,10 @@
-import { db, id, now, getSetting, token } from './db.js'
+import { db, id, now, getSetting, token, inBusinessHours, localNow } from './db.js'
+export { localNow }
 import { emit, type AppEvent } from './bus.js'
-import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat } from './core.js'
+import { addLabel, addNote, assignChat, autoReplyLimitReached, createTicket, getChat, getNumber, removeLabel, sendMessage, updateChat, updateTicket } from './core.js'
 import { agentReply, generate } from './ai.js'
 
-export const TRIGGERS = ['message.received', 'message.sent', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
+export const TRIGGERS = ['message.received', 'message.sent', 'message.reaction', 'chat.created', 'ticket.created', 'ticket.updated', 'webhook', 'schedule'] as const
 export type Condition = { field: string; op: string; value?: string }
 export type Action = { type: string; [k: string]: any }
 export type Automation = {
@@ -46,15 +47,6 @@ export function render(tpl: unknown, ctx: any): string {
   })
 }
 
-export function localNow() {
-  return new Date(Date.now() + getSetting('workspace').timezoneOffsetMinutes * 60_000)
-}
-export function inBusinessHours() {
-  const bh = getSetting('businessHours')
-  const d = localNow()
-  const hhmm = d.toISOString().slice(11, 16)
-  return bh.days.includes(d.getUTCDay()) && hhmm >= bh.start && hhmm < bh.end
-}
 
 function test(c: Condition, ctx: any) {
   const raw = c.field === 'time.business_hours' ? inBusinessHours() : c.field === 'chat.labels' ? (ctx.chat?.labels || []).map((l: any) => l.name).join(',') : lookup(ctx, c.field)
@@ -113,6 +105,21 @@ async function runAction(a: Action, ctx: any, auto: Automation, state: { replied
       ctx.ticket = t
       return `Created ticket #${t.seq}`
     }
+    case 'update_ticket': {
+      const t = ctx.ticket || (chatId ? db.prepare('SELECT * FROM tickets WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1').get(chatId) : null)
+      if (!t) throw new Error('No ticket to update for this chat')
+      const patch: any = {}
+      if (['open', 'in_progress', 'resolved'].includes(a.status)) patch.status = a.status
+      if (['low', 'medium', 'high', 'urgent'].includes(a.priority)) patch.priority = a.priority
+      ctx.ticket = updateTicket(t.id, patch)
+      return `Ticket #${t.seq} updated`
+    }
+    case 'set_property': {
+      const key = render(a.key, ctx).trim()
+      if (!key) throw new Error('Property name is required')
+      updateChat(needChat(), { props: { ...(getChat(needChat())?.props || {}), [key]: render(a.value, ctx) } })
+      return `Set ${key}`
+    }
     case 'http_request': {
       const method = (a.method || 'POST').toUpperCase()
       let headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -151,7 +158,7 @@ export async function executeAutomation(auto: Automation, ctx: any, summary: str
 export function buildContext(data: any) {
   const chat = data.chat || (data.message?.chat_id ? getChat(data.message.chat_id) : null)
   return {
-    message: data.message, chat, ticket: data.ticket, webhook: data.webhook,
+    message: data.message, chat, ticket: data.ticket, webhook: data.webhook, reaction: data.reaction,
     contact: { name: data.message?.sender_name || chat?.name, phone: chat?.phone },
     number: chat ? getNumber(chat.number_id) : undefined,
     workspace: getSetting('workspace'), now: new Date().toISOString(),
@@ -164,6 +171,7 @@ const claimed = new Map<string, number>()
 export async function runAutomations(evt: AppEvent) {
   if (!(TRIGGERS as readonly string[]).includes(evt.event)) return false
   if (evt.event === 'message.sent' && /^(automation|ai|broadcast|scheduled)/.test(evt.meta?.sentBy || '')) return false
+  // Tickets raised from a reaction attach to the chat's open ticket instead of piling up duplicates.
   if (evt.event === 'ticket.created' && /^automation:/.test(evt.data.ticket?.created_by || '')) return false
   let replied = false
   for (const auto of listAutomations()) {

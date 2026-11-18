@@ -6,7 +6,8 @@ import { bus, type AppEvent } from './bus.js'
 import * as core from './core.js'
 import * as kb from './knowledge.js'
 import { SandboxTransport } from './wa.js'
-import { agentReply, generate, aiConfigured, runModel } from './ai.js'
+import { agentReply, assistant, generate, aiConfigured, playground, PERSONALITIES } from './ai.js'
+import { runTraining } from './training.js'
 import { automationView, buildContext, executeAutomation, getAutomation, listAutomations, saveAutomation, TRIGGERS } from './automations.js'
 import { forgetServer, listServerTools } from './mcpClient.js'
 
@@ -173,6 +174,13 @@ api.post('/numbers/:id/logout', admin, async (req, res) => {
   await core.getTransport(n.id)?.logout()
   res.json(core.numberView(core.getNumber(n.id)))
 })
+api.post('/numbers/:id/simulate-reaction', (req, res) => {
+  const t = core.getTransport(String(req.params.id))
+  if (!(t instanceof SandboxTransport)) bad('Only sandbox numbers can simulate reactions')
+  const m = need(core.getMessage(str(req.body.message_id, 'message_id')), 'Message not found')
+  ;(t as SandboxTransport).react(m.wa_id, str(req.body.emoji, 'emoji'), !!req.body.from_team)
+  res.json({ ok: true })
+})
 api.delete('/numbers/:id', admin, async (req, res) => { await core.removeNumber(String(req.params.id)); res.json({ ok: true }) })
 api.post('/numbers/:id/simulate', (req, res) => {
   const t = core.getTransport(String(req.params.id))
@@ -184,7 +192,7 @@ api.post('/numbers/:id/simulate', (req, res) => {
 // ---------- chats & messages ----------
 api.get('/chats', (req, res) => {
   const q = req.query as Record<string, string>
-  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
+  res.json(core.listChats({ q: q.q, number_id: q.number_id, label: q.label, assignee: q.assignee === 'me' ? req.actor!.id : q.assignee, needs_reply: q.needs_reply === 'true', status: q.status, type: q.type, unread: q.unread === 'true', limit: Number(q.limit) || undefined }))
 })
 api.get('/chats/:id', (req, res) => res.json(need(core.getChat(req.params.id), 'Chat not found')))
 api.patch('/chats/:id', (req, res) => {
@@ -290,12 +298,24 @@ api.post('/knowledge', async (req, res) => {
   if (req.body.url) return res.json(await kb.importUrl(str(req.body.url, 'URL')).catch((e) => bad(e.message)))
   res.json(kb.addDoc({ title: str(req.body.title, 'Title'), content: str(req.body.content, 'Content') }))
 })
-api.post('/knowledge/upload', upload.single('file'), (req, res) => {
+api.post('/knowledge/upload', upload.single('file'), async (req, res) => {
   const f = req.file ?? bad('Choose a file to upload')
-  if (!/\.(txt|md|markdown|csv|json|html?)$/i.test(f.originalname)) bad('Supported files: .txt, .md, .csv, .json, .html')
+  if (!/\.(txt|md|markdown|csv|json|html?|pdf)$/i.test(f.originalname)) bad('Supported files: .pdf, .txt, .md, .csv, .json, .html')
+  const title = f.originalname.replace(/\.[^.]+$/, '')
+  if (/\.pdf$/i.test(f.originalname)) {
+    const content = await kb.pdfToText(f.buffer).catch(() => '')
+    if (!content) bad('No readable text found in that PDF (scanned images are not supported)')
+    return res.json(kb.addDoc({ title, content, source: 'file' }))
+  }
   const raw = f.buffer.toString('utf8')
-  res.json(kb.addDoc({ title: f.originalname.replace(/\.[^.]+$/, ''), content: /\.html?$/i.test(f.originalname) ? kb.htmlToText(raw) : raw, source: 'file' }))
+  res.json(kb.addDoc({ title, content: /\.html?$/i.test(f.originalname) ? kb.htmlToText(raw) : raw, source: 'file' }))
 })
+
+// FAQs: the main way to train the agent. Learned entries wait in "review" until someone approves them.
+api.get('/faqs', (_req, res) => res.json(kb.listFaqs()))
+api.post('/faqs', (req, res) => { try { res.json(kb.saveFaq(req.body || {})) } catch (e: any) { bad(e.message) } })
+api.put('/faqs/:id', (req, res) => { need(kb.getFaq(req.params.id)); try { res.json(kb.saveFaq(req.body || {}, req.params.id)) } catch (e: any) { bad(e.message) } })
+api.delete('/faqs/:id', (req, res) => { kb.deleteFaq(req.params.id); res.json({ ok: true }) })
 api.put('/knowledge/:id', (req, res) => res.json(need(kb.updateDoc(req.params.id, { title: req.body.title, content: req.body.content }))))
 api.delete('/knowledge/:id', (req, res) => { kb.deleteDoc(req.params.id); res.json({ ok: true }) })
 
@@ -308,29 +328,77 @@ api.put('/ai/settings', admin, (req, res) => {
   setSetting('ai', { ...rest, ...(typeof apiKey === 'string' && !apiKey.includes('…') ? { apiKey: apiKey.trim() } : {}) })
   res.json(maskAi())
 })
-/** Playground: ask the agent something without touching any real chat. */
+const turnsOf = (body: any) => {
+  const list = Array.isArray(body?.messages) ? body.messages : [{ role: 'user', text: body?.message }]
+  const turns = list.filter((m: any) => m && typeof m.text === 'string' && m.text.trim()).map((m: any) => ({ role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const), text: m.text }))
+  return turns.length ? turns.slice(-30) : bad('message is required')
+}
+/** Playground: talk to the agent as a customer would. Nothing is sent or changed. */
 api.post('/ai/test', async (req, res) => {
-  const hits = kb.searchKnowledge(str(req.body.message, 'message'))
-  const cfg = getSetting('ai')
-  const system = `${cfg.instructions}\nYour name is ${cfg.agentName}. You work for ${getSetting('workspace').name}. Write short plain-text WhatsApp replies.\n\nRelevant knowledge:\n${hits.map((h) => `## ${h.title}\n${h.body}`).join('\n\n') || '(nothing found)'}`
-  const r = await runModel(system, [{ role: 'user', text: req.body.message }]).catch((e) => bad(e.message))
-  res.json({ text: r.text, sources: hits.map((h) => h.title) })
+  const turns = turnsOf(req.body)
+  const r = await playground(turns).catch((e) => bad(e.message))
+  res.json({ text: r.text, steps: r.trace.map((t) => ({ tool: t.tool, input: t.input })), sources: [...new Set(kb.searchKnowledge(turns[turns.length - 1].text).map((h) => h.title))] })
 })
+/** Workspace assistant for teammates: bulk actions and lookups in plain language. */
+api.post('/assistant', async (req, res) => {
+  const r = await assistant(turnsOf(req.body)).catch((e) => bad(e.message))
+  res.json({ text: r.text, steps: r.trace.map((t) => ({ tool: t.tool, input: t.input })) })
+})
+api.get('/ai/personalities', (_req, res) => res.json(Object.entries(PERSONALITIES).map(([key, p]) => ({ key, ...p }))))
+api.get('/ai/logs', (_req, res) => res.json((db.prepare('SELECT l.*, c.name AS chat_name FROM ai_logs l LEFT JOIN chats c ON c.id = l.chat_id ORDER BY l.created_at DESC LIMIT 100').all() as any[]).map((l) => ({ ...l, trace: JSON.parse(l.trace) }))))
+api.get('/ai/training', (_req, res) => res.json(db.prepare('SELECT * FROM training_runs ORDER BY created_at DESC LIMIT 30').all()))
+api.post('/ai/training/run', admin, async (_req, res) => res.json(await runTraining('manual')))
+
+// ---------- custom tools: let the agent call your own HTTP APIs ----------
+const toolView = (t: any) => { const auth = JSON.parse(t.auth); return { ...t, enabled: !!t.enabled, params: JSON.parse(t.params), headers: JSON.parse(t.headers), auth: { type: auth.type, header: auth.header, username: auth.username, has_secret: !!(auth.token || auth.value || auth.password) } } }
+function toolInput(b: any, cur?: any) {
+  const name = str(b.name, 'Name').toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 48)
+  if (['search_knowledge', 'create_ticket', 'add_label', 'handoff_to_human', 'add_private_note'].includes(name)) bad('That name is reserved for a built-in tool')
+  const url = str(b.url, 'URL')
+  try { new URL(url.replace(/\{[^}]+\}/g, 'x')) } catch { bad('Enter a full URL, for example https://api.example.com/orders/{order_id}') }
+  const method = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(b.method) ? b.method : 'GET'
+  const params = (Array.isArray(b.params) ? b.params : []).filter((p: any) => p && String(p.name || '').trim()).map((p: any) => ({ name: String(p.name).trim().replace(/[^A-Za-z0-9_]+/g, '_'), type: ['number', 'boolean'].includes(p.type) ? p.type : 'string', location: ['query', 'path', 'body'].includes(p.location) ? p.location : 'body', required: !!p.required, description: String(p.description || '') }))
+  let headers = {}
+  if (b.headers) { try { headers = typeof b.headers === 'string' ? JSON.parse(b.headers || '{}') : b.headers } catch { bad('Headers must be JSON') } }
+  const prev = cur ? JSON.parse(cur.auth) : {}
+  const a = b.auth || { type: 'none' }
+  // Secrets are write-only: an empty secret on edit keeps the stored one.
+  const auth = { type: ['none', 'bearer', 'api_key', 'basic'].includes(a.type) ? a.type : 'none', header: a.header, username: a.username, token: a.token || (prev.type === a.type ? prev.token : undefined), value: a.value || (prev.type === a.type ? prev.value : undefined), password: a.password || (prev.type === a.type ? prev.password : undefined) }
+  return { name, description: str(b.description, 'Description (tell the AI when to use this tool)'), method, url, auth: JSON.stringify(auth), headers: JSON.stringify(headers), params: JSON.stringify(params), enabled: b.enabled === false ? 0 : 1 }
+}
+api.get('/ai/tools', (_req, res) => res.json((db.prepare('SELECT * FROM ai_tools ORDER BY created_at').all() as any[]).map(toolView)))
+api.post('/ai/tools', admin, (req, res) => {
+  const t = toolInput(req.body || {})
+  if (db.prepare('SELECT 1 FROM ai_tools WHERE name = ?').get(t.name)) bad('A tool with that name already exists')
+  const toolId = id('tool')
+  db.prepare('INSERT INTO ai_tools(id, name, description, method, url, auth, headers, params, enabled, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(toolId, t.name, t.description, t.method, t.url, t.auth, t.headers, t.params, t.enabled, now())
+  res.json(toolView(db.prepare('SELECT * FROM ai_tools WHERE id = ?').get(toolId)))
+})
+api.put('/ai/tools/:id', admin, (req, res) => {
+  const cur = need(db.prepare('SELECT * FROM ai_tools WHERE id = ?').get(req.params.id) as any)
+  if (Object.keys(req.body || {}).every((k) => k === 'enabled')) db.prepare('UPDATE ai_tools SET enabled = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, cur.id)
+  else { const t = toolInput(req.body, cur); db.prepare('UPDATE ai_tools SET name=?, description=?, method=?, url=?, auth=?, headers=?, params=?, enabled=? WHERE id=?').run(t.name, t.description, t.method, t.url, t.auth, t.headers, t.params, t.enabled, cur.id) }
+  res.json(toolView(db.prepare('SELECT * FROM ai_tools WHERE id = ?').get(cur.id)))
+})
+api.delete('/ai/tools/:id', admin, (req, res) => { db.prepare('DELETE FROM ai_tools WHERE id = ?').run(req.params.id); res.json({ ok: true }) })
 
 // ---------- external MCP servers (tools for the AI agent) ----------
-const mcpView = (s: any) => ({ ...s, enabled: !!s.enabled, headers: undefined, has_headers: s.headers !== '{}' })
+const mcpView = (s: any) => ({ ...s, enabled: !!s.enabled, headers: undefined, has_headers: s.headers !== '{}', disabled_tools: JSON.parse(s.disabled_tools || '[]') })
 api.get('/mcp-servers', (_req, res) => res.json((db.prepare('SELECT * FROM mcp_servers ORDER BY created_at').all() as any[]).map(mcpView)))
 api.post('/mcp-servers', admin, (req, res) => {
   const url = str(req.body.url, 'URL')
   try { new URL(url) } catch { bad('Enter a full URL, for example https://example.com/mcp') }
   let headers = '{}'
   if (req.body.headers) { try { headers = JSON.stringify(typeof req.body.headers === 'string' ? JSON.parse(req.body.headers) : req.body.headers) } catch { bad('Headers must be JSON, for example {"Authorization": "Bearer ..."}') } }
+  // Shortcut for the common case: a single bearer token.
+  if (req.body.token) headers = JSON.stringify({ ...JSON.parse(headers), Authorization: `Bearer ${String(req.body.token).trim()}` })
   const s = { id: id('mcp'), name: str(req.body.name, 'Name'), url, headers }
   db.prepare('INSERT INTO mcp_servers(id, name, url, headers, created_at) VALUES(?,?,?,?,?)').run(s.id, s.name, s.url, s.headers, now())
   res.json(mcpView(db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(s.id)))
 })
 api.patch('/mcp-servers/:id', admin, (req, res) => {
-  db.prepare('UPDATE mcp_servers SET enabled = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, req.params.id)
+  const cur = need(db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(req.params.id) as any)
+  db.prepare('UPDATE mcp_servers SET enabled = ?, disabled_tools = ? WHERE id = ?').run(req.body.enabled == null ? cur.enabled : req.body.enabled ? 1 : 0, Array.isArray(req.body.disabled_tools) ? JSON.stringify(req.body.disabled_tools.map(String)) : cur.disabled_tools, cur.id)
   res.json(mcpView(need(db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(req.params.id))))
 })
 api.delete('/mcp-servers/:id', admin, (req, res) => { forgetServer(String(req.params.id)); db.prepare('DELETE FROM mcp_servers WHERE id = ?').run(req.params.id); res.json({ ok: true }) })
@@ -382,6 +450,22 @@ api.put('/settings', admin, (req, res) => {
   for (const k of ['workspace', 'businessHours', 'sending'] as const) if (req.body[k] && typeof req.body[k] === 'object') setSetting(k, req.body[k])
   res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending') })
 })
+// ---------- exports ----------
+api.get('/export/:kind', (req, res) => {
+  const cell = (v: unknown) => { const t = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t }
+  const users = Object.fromEntries((db.prepare('SELECT id, name FROM users').all() as any[]).map((u) => [u.id, u.name]))
+  const iso = (t: number | null) => (t ? new Date(t).toISOString() : '')
+  let rows: Record<string, unknown>[]
+  if (req.params.kind === 'chats.csv') rows = core.listChats({ limit: 500 }).map((c: any) => ({ id: c.id, name: c.name, phone: c.phone, type: c.type, status: c.status, assignee: users[c.assignee_id] || '', labels: c.labels.map((l: any) => l.name).join('; '), unread: c.unread, last_message_at: iso(c.last_message_at), last_message: c.last_message_preview, properties: Object.keys(c.props).length ? c.props : '' }))
+  else if (req.params.kind === 'tickets.csv') rows = (db.prepare('SELECT t.*, c.name AS chat_name FROM tickets t LEFT JOIN chats c ON c.id = t.chat_id ORDER BY t.created_at DESC').all() as any[]).map((t) => ({ number: t.seq, title: t.title, description: t.description, status: t.status, priority: t.priority, assignee: users[t.assignee_id] || '', chat: t.chat_name, created_by: t.created_by, created_at: iso(t.created_at), updated_at: iso(t.updated_at) }))
+  else if (req.params.kind === 'messages.csv') rows = (db.prepare(`SELECT m.*, c.name AS chat_name FROM messages m JOIN chats c ON c.id = m.chat_id ${req.query.chat_id ? 'WHERE m.chat_id = ?' : ''} ORDER BY m.created_at DESC LIMIT 20000`).all(...(req.query.chat_id ? [req.query.chat_id] : [])) as any[]).map((m) => ({ chat: m.chat_name, direction: m.direction, from: m.sender_name, type: m.type, text: m.text, status: m.status, sent_by: m.sent_by, at: iso(m.created_at) }))
+  else throw new HttpError(404, 'Unknown export. Use chats.csv, tickets.csv or messages.csv')
+  const head = Object.keys(rows[0] || { empty: '' })
+  res.setHeader('content-type', 'text/csv; charset=utf-8')
+  res.setHeader('content-disposition', `attachment; filename="${req.params.kind}"`)
+  res.send([head.join(','), ...rows.map((r) => head.map((h) => cell(r[h])).join(','))].join('\n'))
+})
+
 api.get('/analytics', (_req, res) => {
   const since = now() - 7 * 86_400_000
   const one = (sql: string, ...a: any[]) => (db.prepare(sql).get(...a) as any).n as number

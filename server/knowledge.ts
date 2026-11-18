@@ -70,3 +70,40 @@ export async function importUrl(url: string) {
   if (!content) throw new Error('No readable text found at that URL')
   return addDoc({ title, content, source: 'url', url })
 }
+
+// ---------- FAQs: question variations, one answer, optional handling instructions ----------
+export type Faq = { id: string; questions: string[]; answer: string; instructions: string | null; status: 'active' | 'review' | 'disabled'; source: 'manual' | 'learned'; created_at: number; updated_at: number }
+const faqView = (r: any): Faq => ({ ...r, questions: JSON.parse(r.questions) })
+function indexFaq(f: Faq) {
+  db.prepare('DELETE FROM kb_chunks WHERE doc_id = ?').run(f.id)
+  // Only approved entries are searchable, so the agent never uses something a person has not accepted.
+  if (f.status !== 'active') return
+  const body = `Customer question: ${f.questions.join(' / ')}\nAnswer: ${f.answer}${f.instructions ? `\nHow to handle (internal, do not quote): ${f.instructions}` : ''}`
+  db.prepare('INSERT INTO kb_chunks(doc_id, title, body) VALUES(?,?,?)').run(f.id, `FAQ: ${f.questions.join(' ')}`, body)
+}
+export const listFaqs = () => (db.prepare('SELECT * FROM kb_faqs ORDER BY (status = \'review\') DESC, updated_at DESC').all() as any[]).map(faqView)
+export const getFaq = (faqId: string) => { const r = db.prepare('SELECT * FROM kb_faqs WHERE id = ?').get(faqId); return r ? faqView(r) : null }
+const cleanQuestions = (q: unknown) => (Array.isArray(q) ? q : String(q || '').split('\n')).map((x) => String(x).trim()).filter(Boolean)
+export function saveFaq(input: { questions?: unknown; answer?: string; instructions?: string | null; status?: string; source?: string }, faqId?: string) {
+  const cur = faqId ? getFaq(faqId) : null
+  const questions = input.questions !== undefined ? cleanQuestions(input.questions) : cur?.questions || []
+  const answer = (input.answer ?? cur?.answer ?? '').trim()
+  if (!questions.length || !answer) throw new Error('An FAQ needs at least one question and an answer')
+  const status = ['active', 'review', 'disabled'].includes(input.status || '') ? input.status! : cur?.status || 'active'
+  const row = { id: cur?.id || id('faq'), questions: JSON.stringify(questions), answer, instructions: (input.instructions ?? cur?.instructions ?? '') || null, status, source: cur?.source || (input.source === 'learned' ? 'learned' : 'manual') }
+  if (cur) db.prepare('UPDATE kb_faqs SET questions=?, answer=?, instructions=?, status=?, updated_at=? WHERE id=?').run(row.questions, row.answer, row.instructions, row.status, now(), row.id)
+  else db.prepare('INSERT INTO kb_faqs(id, questions, answer, instructions, status, source, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)').run(row.id, row.questions, row.answer, row.instructions, row.status, row.source, now(), now())
+  const saved = getFaq(row.id)!
+  indexFaq(saved)
+  return saved
+}
+export function deleteFaq(faqId: string) {
+  db.prepare('DELETE FROM kb_chunks WHERE doc_id = ?').run(faqId)
+  db.prepare('DELETE FROM kb_faqs WHERE id = ?').run(faqId)
+}
+
+export async function pdfToText(buffer: Buffer) {
+  const { extractText } = await import('unpdf')
+  const { text } = await extractText(new Uint8Array(buffer), { mergePages: true })
+  return String(text || '').trim()
+}

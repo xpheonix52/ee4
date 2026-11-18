@@ -69,6 +69,28 @@ CREATE TABLE IF NOT EXISTS mcp_servers (id TEXT PRIMARY KEY, name TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `)
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS kb_faqs (
+  id TEXT PRIMARY KEY, questions TEXT NOT NULL, answer TEXT NOT NULL, instructions TEXT, status TEXT NOT NULL DEFAULT 'active',
+  source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_tools (
+  id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL, method TEXT NOT NULL DEFAULT 'GET', url TEXT NOT NULL,
+  auth TEXT NOT NULL DEFAULT '{"type":"none"}', headers TEXT NOT NULL DEFAULT '{}', params TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_logs (id TEXT PRIMARY KEY, chat_id TEXT, kind TEXT NOT NULL, input TEXT, output TEXT, trace TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ai_logs_at ON ai_logs(created_at DESC);
+CREATE TABLE IF NOT EXISTS training_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, trigger TEXT NOT NULL, learned INTEGER NOT NULL DEFAULT 0, chats INTEGER NOT NULL DEFAULT 0, error TEXT, created_at INTEGER NOT NULL);
+`)
+// Columns added after the first release: applied in place so existing installs upgrade without losing data.
+function addColumn(table: string, column: string, ddl: string) {
+  if (!(db.prepare(`PRAGMA table_info(${table})`).all() as any[]).some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+}
+addColumn('chats', 'props', `TEXT NOT NULL DEFAULT '{}'`)
+addColumn('chats', 'internal', 'INTEGER NOT NULL DEFAULT 0')
+addColumn('chats', 'ai_snooze_until', 'INTEGER')
+addColumn('mcp_servers', 'disabled_tools', `TEXT NOT NULL DEFAULT '[]'`)
+
 export const now = () => Date.now()
 export const id = (prefix: string) => `${prefix}_${crypto.randomBytes(9).toString('base64url')}`
 export const token = (bytes = 24) => crypto.randomBytes(bytes).toString('base64url')
@@ -92,6 +114,10 @@ export type Settings = {
   ai: {
     provider: 'anthropic' | 'openai'; apiKey: string; baseUrl: string; model: string
     agentName: string; instructions: string; replyInGroups: boolean; handoffMessage: string
+    personality: 'friendly' | 'grounded' | 'spartan' | 'sales'; restrictions: string
+    hours: 'always' | 'business' | 'outside'; responseDelaySeconds: number; snoozeSeconds: number; activationRules: string
+    allowSend: boolean; allowTickets: boolean; allowNotes: boolean
+    selfTrainWeekly: boolean; selfLearnApproval: boolean
   }
 }
 const DEFAULTS: Settings = {
@@ -102,6 +128,8 @@ const DEFAULTS: Settings = {
     provider: 'anthropic', apiKey: '', baseUrl: '', model: 'claude-opus-5-5', agentName: 'Assistant',
     instructions: 'You are a friendly, concise support assistant replying on WhatsApp. Answer using the knowledge hub. If you are not sure or the customer asks for a person, hand off to a human.',
     replyInGroups: false, handoffMessage: 'Let me connect you with a teammate who can help. They will reply here shortly.',
+    personality: 'friendly', restrictions: '', hours: 'always', responseDelaySeconds: 3, snoozeSeconds: 60, activationRules: '',
+    allowSend: true, allowTickets: true, allowNotes: true, selfTrainWeekly: true, selfLearnApproval: true,
   },
 }
 export function getSetting<K extends keyof Settings>(key: K): Settings[K] {
@@ -112,4 +140,14 @@ export function setSetting<K extends keyof Settings>(key: K, value: Partial<Sett
   const merged = { ...getSetting(key), ...value }
   db.prepare('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(merged))
   return merged
+}
+
+export function localNow() {
+  return new Date(Date.now() + getSetting('workspace').timezoneOffsetMinutes * 60_000)
+}
+export function inBusinessHours() {
+  const bh = getSetting('businessHours')
+  const d = localNow()
+  const hhmm = d.toISOString().slice(11, 16)
+  return bh.days.includes(d.getUTCDay()) && hhmm >= bh.start && hhmm < bh.end
 }

@@ -26,6 +26,10 @@ export async function startNumber(n: { id: string; kind: string }) {
       if (row) emit('number.status', numberView(row))
     },
     onMessage: (m: Incoming, history?: boolean) => { try { ingest(n.id, m, { silent: history }) } catch (e) { console.error('[core] ingest failed', e) } },
+    onReaction: (r: { targetWaId: string; emoji: string; fromMe: boolean }) => {
+      const msg = db.prepare('SELECT m.* FROM messages m JOIN chats c ON c.id = m.chat_id WHERE c.number_id = ? AND m.wa_id = ?').get(n.id, r.targetWaId) as any
+      if (msg && r.emoji) emit('message.reaction', { message: messageView(msg), chat: getChat(msg.chat_id), reaction: { emoji: r.emoji, from_team: r.fromMe } })
+    },
     onReceipt: (waId: string, status: string) => {
       const msg = db.prepare("SELECT m.* FROM messages m JOIN chats c ON c.id = m.chat_id WHERE c.number_id = ? AND m.wa_id = ? AND m.direction = 'out'").get(n.id, waId) as any
       const rank: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3 }
@@ -57,7 +61,9 @@ export async function startAllNumbers() {
 export function chatView(c: any) {
   if (!c) return c
   const labels = db.prepare('SELECT l.* FROM labels l JOIN chat_labels cl ON cl.label_id = l.id WHERE cl.chat_id = ? ORDER BY l.name').all(c.id)
-  return { ...c, labels }
+  let props: Record<string, string> = {}
+  try { props = JSON.parse(c.props || '{}') } catch { /* keep empty */ }
+  return { ...c, labels, props, internal: !!c.internal }
 }
 export function messageView(m: any) {
   if (!m) return m
@@ -67,7 +73,7 @@ export function messageView(m: any) {
 export const getChat = (chatId: string) => chatView(db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId))
 export const getMessage = (messageId: string) => db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId) as any
 
-export function listChats(f: { q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
+export function listChats(f: { needs_reply?: boolean; q?: string; number_id?: string; label?: string; assignee?: string; status?: string; unread?: boolean; type?: string; limit?: number }) {
   const where: string[] = []
   const args: any[] = []
   if (f.q) { where.push('(c.name LIKE ? OR c.phone LIKE ? OR c.last_message_preview LIKE ?)'); args.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`) }
@@ -75,6 +81,8 @@ export function listChats(f: { q?: string; number_id?: string; label?: string; a
   if (f.status) { where.push('c.status = ?'); args.push(f.status) }
   if (f.type) { where.push('c.type = ?'); args.push(f.type) }
   if (f.unread) where.push('c.unread > 0')
+  // Waiting on us: the customer spoke last and the chat is still open.
+  if (f.needs_reply) where.push(`c.status = 'open' AND c.internal = 0 AND (SELECT m.direction FROM messages m WHERE m.chat_id = c.id AND m.direction != 'note' ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) = 'in'`)
   if (f.assignee === 'none') where.push('c.assignee_id IS NULL')
   else if (f.assignee) { where.push('c.assignee_id = ?'); args.push(f.assignee) }
   if (f.label) { where.push('EXISTS (SELECT 1 FROM chat_labels cl WHERE cl.chat_id = c.id AND cl.label_id = ?)'); args.push(f.label) }
@@ -109,7 +117,11 @@ export function upsertChat(numberId: string, jid: string, info: { type?: string;
   return { chat: db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId) as any, created: true }
 }
 export function updateChat(chatId: string, patch: Record<string, any>) {
-  const allowed = ['assignee_id', 'status', 'ai_mode', 'name', 'unread']
+  const allowed = ['assignee_id', 'status', 'ai_mode', 'name', 'unread', 'props', 'internal', 'ai_snooze_until']
+  patch = { ...patch }
+  if (patch.props && typeof patch.props === 'object') patch.props = JSON.stringify(Object.fromEntries(Object.entries(patch.props).filter(([k, v]) => k.trim() && v != null && v !== '').map(([k, v]) => [k.trim(), String(v)])))
+  else delete patch.props
+  if ('internal' in patch) patch.internal = patch.internal ? 1 : 0
   const keys = Object.keys(patch).filter((k) => allowed.includes(k))
   if (keys.length) db.prepare(`UPDATE chats SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => patch[k]), chatId)
   const chat = getChat(chatId)

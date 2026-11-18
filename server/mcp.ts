@@ -3,15 +3,15 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod'
 import type { Request, Response } from 'express'
 import { db } from './db.js'
-import { addLabel, addNote, assignChat, chatForPhone, createTicket, listChats, listMessages, listNumbers, sendMessage, updateTicket } from './core.js'
-import { addDoc, searchKnowledge } from './knowledge.js'
+import { addLabel, addNote, assignChat, chatForPhone, createTicket, getChat, listChats, listMessages, listNumbers, sendMessage, updateChat, updateTicket } from './core.js'
+import { addDoc, saveFaq, searchKnowledge } from './knowledge.js'
 import { listAutomations, saveAutomation, TRIGGERS } from './automations.js'
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] })
-const slimChat = (c: any) => ({ id: c.id, name: c.name, phone: c.phone, type: c.type, number_id: c.number_id, unread: c.unread, status: c.status, assignee_id: c.assignee_id, last_message: c.last_message_preview, last_message_at: c.last_message_at, labels: c.labels.map((l: any) => l.name) })
+const slimChat = (c: any) => ({ id: c.id, name: c.name, phone: c.phone, type: c.type, number_id: c.number_id, unread: c.unread, status: c.status, assignee_id: c.assignee_id, last_message: c.last_message_preview, last_message_at: c.last_message_at, labels: c.labels.map((l: any) => l.name), properties: c.props })
 const slimMsg = (m: any) => ({ id: m.id, direction: m.direction, from: m.sender_name, type: m.type, text: m.text, status: m.status, at: new Date(m.created_at).toISOString() })
 
-function build() {
+export function buildMcpServer() {
   const s = new McpServer({ name: 'switchboard', version: '0.1.0' })
   const tool = (name: string, description: string, shape: z.ZodRawShape, run: (a: any) => unknown | Promise<unknown>) =>
     s.registerTool(name, { description, inputSchema: shape }, async (a: any) => {
@@ -38,6 +38,10 @@ function build() {
   tool('list_team', 'List teammates (id, name, email, role).', {}, () => db.prepare('SELECT id, name, email, role FROM users ORDER BY name').all())
   tool('search_knowledge', 'Search the knowledge hub and return the most relevant passages.', { query: z.string().min(1), limit: z.number().int().min(1).max(20).optional() }, (a) => searchKnowledge(a.query, a.limit || 5).map((h) => ({ title: h.title, text: h.body })))
   tool('add_knowledge', 'Add a document to the knowledge hub so the AI agent can use it.', { title: z.string().min(1), content: z.string().min(1) }, (a) => { const d = addDoc(a); return { id: d.id, title: d.title } })
+  tool('add_faq', 'Teach the AI agent: add a question (with optional alternative phrasings) and the answer it should give. Optional instructions tell the agent how to handle the topic.',
+    { questions: z.array(z.string().min(1)).min(1), answer: z.string().min(1), instructions: z.string().optional() }, (a) => { const f = saveFaq(a); return { id: f.id, questions: f.questions } })
+  tool('set_chat_properties', 'Set custom properties on a chat (for example org_id, plan, city). Existing properties are kept unless overwritten.',
+    { chat_id: z.string(), properties: z.record(z.string()) }, (a) => { const c = getChat(a.chat_id); if (!c) throw new Error('Chat not found'); return slimChat(updateChat(a.chat_id, { props: { ...c.props, ...a.properties } })) })
   tool('list_tickets', 'List tickets, newest first.', { status: z.enum(['open', 'in_progress', 'resolved']).optional(), limit: z.number().int().min(1).max(200).optional() },
     (a) => db.prepare(`SELECT t.*, c.name AS chat_name FROM tickets t LEFT JOIN chats c ON c.id = t.chat_id ${a.status ? 'WHERE t.status = ?' : ''} ORDER BY t.created_at DESC LIMIT ?`).all(...(a.status ? [a.status] : []), a.limit || 50))
   tool('create_ticket', 'Create a ticket, optionally linked to a chat.', { title: z.string().min(1), description: z.string().optional(), chat_id: z.string().optional(), priority: z.enum(['low', 'medium', 'high', 'urgent']).optional() },
@@ -60,7 +64,7 @@ function build() {
 
 /** Stateless Streamable HTTP endpoint: one server per request, so it scales and survives restarts. */
 export async function handleMcp(req: Request, res: Response) {
-  const server = build()
+  const server = buildMcpServer()
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
   res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}) })
   await server.connect(transport)

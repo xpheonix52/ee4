@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { db } from './db.js'
 
-type Server = { id: string; name: string; url: string; headers: string; enabled: number }
+type Server = { id: string; name: string; url: string; headers: string; enabled: number; disabled_tools: string }
 
 async function withClient<T>(s: Server, fn: (c: Client) => Promise<T>): Promise<T> {
   const transport = new StreamableHTTPClientTransport(new URL(s.url), { requestInit: { headers: JSON.parse(s.headers || '{}') } })
@@ -27,12 +27,14 @@ export async function externalTools() {
   for (const s of db.prepare('SELECT * FROM mcp_servers WHERE enabled = 1').all() as Server[]) {
     try {
       const slug = s.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20)
+      const off: string[] = JSON.parse(s.disabled_tools || '[]')
       for (const t of await listServerTools(s)) {
+        if (off.includes(t.name)) continue
         out.push({
           name: `${slug}__${t.name}`.slice(0, 64), description: t.description || t.name, schema: t.inputSchema,
           run: async (input) => {
             const r: any = await withClient(s, (c) => c.callTool({ name: t.name, arguments: input }))
-            return (r.content || []).map((b: any) => (b.type === 'text' ? b.text : `[${b.type}]`)).join('\n') || 'ok'
+            return (r.content || []).map((b: any) => (b.type === 'text' ? b.text : `[${b.type}]`)).join('\n').slice(0, 8000) || 'ok'
           },
         })
       }

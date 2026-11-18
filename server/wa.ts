@@ -14,6 +14,8 @@ export type TransportHandlers = {
   /** `history` marks messages backfilled when a device is linked: stored quietly, never answered. */
   onMessage: (m: Incoming, history?: boolean) => void
   onReceipt: (waId: string, status: 'sent' | 'delivered' | 'read') => void
+  /** Someone reacted to a message with an emoji (fromMe: the reaction came from this number's own phone). */
+  onReaction: (r: { targetWaId: string; emoji: string; fromMe: boolean }) => void
 }
 export interface Transport {
   start(): Promise<void>
@@ -45,6 +47,7 @@ export class SandboxTransport implements Transport {
   async sendMedia() { return this.ack() }
   async resolveJid(phone: string) { return `${phone.replace(/\D/g, '')}@s.whatsapp.net` }
   async pairingCode(): Promise<string> { throw new Error('Sandbox numbers do not need pairing') }
+  react(targetWaId: string, emoji: string, fromMe: boolean) { this.h.onReaction({ targetWaId, emoji, fromMe }) }
   /** Inject a message as if a customer sent it. */
   simulate(m: { from: string; name?: string; text: string; group?: string; timestamp?: number }) {
     const digits = m.from.replace(/\D/g, '')
@@ -163,7 +166,12 @@ export class BaileysTransport implements Transport {
     if (!jid || !m.message || jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast')) return
     const content = b.normalizeMessageContent(m.message)
     const kind = b.getContentType(content)
-    if (!kind || kind === 'protocolMessage' || kind === 'senderKeyDistributionMessage' || kind === 'reactionMessage') return
+    if (kind === 'reactionMessage') {
+      const r: any = content.reactionMessage
+      if (!historyNames && r?.key?.id && r.text) this.h.onReaction({ targetWaId: r.key.id, emoji: r.text, fromMe: !!m.key.fromMe })
+      return
+    }
+    if (!kind || kind === 'protocolMessage' || kind === 'senderKeyDistributionMessage') return
     const c: any = content[kind]
     const isGroup = !!b.isJidGroup(jid)
 

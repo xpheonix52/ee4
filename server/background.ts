@@ -3,7 +3,8 @@ import { db, id, now } from './db.js'
 import { bus, type AppEvent } from './bus.js'
 import { sendMessage } from './core.js'
 import { buildContext, executeAutomation, listAutomations, localNow, runAutomations } from './automations.js'
-import { maybeAutoReply } from './ai.js'
+import { maybeAutoReply, snoozeAgent } from './ai.js'
+import { maybeScheduledTraining } from './training.js'
 
 // ---------- outgoing webhooks ----------
 async function deliver(hook: any, evt: AppEvent) {
@@ -36,6 +37,7 @@ export function startBackground() {
     }
     // Backlog delivered after downtime is stored and shown, but never auto-answered hours late.
     if (evt.meta?.stale) return
+    if (evt.event === 'message.sent' && /^(user:|phone$)/.test(evt.meta?.sentBy || '')) snoozeAgent(evt.data.chat.id)
     // Automations run first; the AI agent only steps in when no automation already answered.
     runAutomations(evt)
       .then((replied) => {
@@ -60,6 +62,7 @@ export async function tick() {
       try { sendMessage({ chatId, text: s.text, sentBy: `${chatIds.length > 1 ? 'broadcast' : 'scheduled'}:${s.id}`, senderName: s.name || 'Scheduled' }) } catch { /* chat was deleted */ }
     }
   }
+  maybeScheduledTraining().catch((e) => console.error('[training] failed', e))
   const local = localNow()
   const hhmm = local.toISOString().slice(11, 16)
   const key = `${local.toISOString().slice(0, 10)} ${hhmm}`

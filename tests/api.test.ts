@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { App, anthropicMock, hmac, mockServer, openAiMock, sleep, until } from './harness.ts'
 
 const app = new App(4310)
-let num: any, apiKey = ''
+let num: any, apiKey = '', llmRef: any
 const mocks: { close: () => Promise<unknown> }[] = []
 
 const simulate = (text: string, from = '15550001', name = 'Ana', group?: string) => app.ok('POST', `/numbers/${num.id}/simulate`, { from, name, text, group })
@@ -182,7 +182,8 @@ test('AI agent (OpenAI-compatible): knowledge answers, auto-reply, handoff, MCP 
   const llm = await openAiMock()
   mocks.push(llm)
   assert.equal((await app.req('POST', '/ai/test', { message: 'hi' })).status, 400) // not configured yet
-  const saved = await app.ok('PUT', '/ai/settings', { provider: 'openai', apiKey: 'sk-test-secret-123456', baseUrl: `${llm.url}/v1`, model: 'mock' })
+  llmRef = llm
+  const saved = await app.ok('PUT', '/ai/settings', { provider: 'openai', apiKey: 'sk-test-secret-123456', baseUrl: `${llm.url}/v1`, model: 'mock', responseDelaySeconds: 0, snoozeSeconds: 0 })
   assert.ok(!JSON.stringify(saved).includes('sk-test-secret-123456'), 'API key must never be returned in full')
   await app.ok('PUT', '/ai/settings', { agentName: 'Robo', apiKey: saved.apiKey }) // masked key round-trip keeps the real one
   assert.equal(llm.calls.length, 0)
@@ -231,6 +232,121 @@ test('AI agent (OpenAI-compatible): knowledge answers, auto-reply, handoff, MCP 
   await app.ok('PATCH', `/numbers/${num.id}`, { ai_enabled: false })
 })
 
+test('training the agent: persona, FAQs, custom tools, activation, self-training, assistant', async () => {
+  const llm = llmRef
+  const systemOf = () => llm.calls.at(-1).body.messages[0].content as string
+  const ask = async (text: string, phone: string, name = 'Tess') => {
+    await simulate(text, phone, name)
+    const chat = await until(() => chatByPhone(phone), 'chat')
+    if (chat.ai_mode !== 'on') await app.ok('PATCH', `/chats/${chat.id}`, { ai_mode: 'on' })
+    return chat
+  }
+  const logs = () => app.ok('GET', '/ai/logs')
+
+  // Persona: personality preset, restrictions and contact properties all reach the model.
+  await app.ok('PUT', '/ai/settings', { personality: 'spartan', restrictions: 'Never discuss refunds.' })
+  const tess = await ask('hello', '15550070')
+  await app.ok('PATCH', `/chats/${tess.id}`, { props: { plan: 'gold', empty: '' } })
+  await simulate('what are your opening hours', '15550070', 'Tess')
+  await until(async () => (await outbound(tess.id)).length >= 1, 'reply')
+  assert.match(systemOf(), /ultra-brief/); assert.match(systemOf(), /Hard restrictions[\s\S]*Never discuss refunds\./); assert.match(systemOf(), /plan = gold/)
+  assert.deepEqual((await app.ok('GET', `/chats/${tess.id}`)).props, { plan: 'gold' })
+
+  // FAQs: variations and handling instructions are searchable; entries awaiting review are not.
+  const faq = await app.ok('POST', '/faqs', { questions: ['Do you ship to Canada?', 'canada delivery'], answer: 'Yes, in 5 days.', instructions: 'Offer express shipping.' })
+  const hit = (await app.ok('GET', '/knowledge/search?q=canada delivery'))[0]
+  assert.match(hit.body, /Yes, in 5 days\./); assert.match(hit.body, /Offer express shipping/)
+  const pending = await app.ok('POST', '/faqs', { questions: 'Do you sell gift cards?', answer: 'Yes, from $10.', status: 'review' })
+  assert.equal((await app.ok('GET', '/knowledge/search?q=gift cards')).length, 0)
+  await app.ok('PUT', `/faqs/${pending.id}`, { status: 'active' })
+  assert.equal((await app.ok('GET', '/knowledge/search?q=gift cards')).length, 1)
+  assert.equal((await app.req('POST', '/faqs', { questions: [], answer: 'x' })).status, 400)
+  await app.ok('DELETE', `/faqs/${faq.id}`)
+  assert.equal((await app.ok('GET', '/knowledge/search?q=canada')).length, 0)
+
+  // Custom tool: the agent calls our HTTP API with a path parameter and a secret that is never echoed back.
+  const shop = await mockServer(() => ({ body: { status: 'shipped', eta: 'Friday' } }))
+  mocks.push(shop)
+  const tool = await app.ok('POST', '/ai/tools', { name: 'Order Status', description: 'Look up an order by id', method: 'GET', url: `${shop.url}/orders/{order_id}`, auth: { type: 'bearer', token: 'tok-secret' }, params: [{ name: 'order_id', type: 'string', location: 'path', required: true, description: 'The order id' }] })
+  assert.equal(tool.name, 'order_status'); assert.ok(!JSON.stringify(await app.ok('GET', '/ai/tools')).includes('tok-secret'))
+  await simulate('where is order AB-123', '15550070', 'Tess')
+  await until(async () => (await outbound(tess.id)).some((m: any) => /shipped/.test(m.text)), 'tool-backed reply')
+  assert.equal(shop.calls[0].url, '/orders/AB-123'); assert.equal(shop.calls[0].headers.authorization, 'Bearer tok-secret')
+  assert.ok((await logs()).some((l: any) => l.kind === 'reply' && l.trace.some((t: any) => t.tool === 'order_status')))
+  await app.ok('PUT', `/ai/tools/${tool.id}`, { enabled: false })
+
+  // Activation rules: a message the rules exclude gets no reply.
+  await app.ok('PUT', '/ai/settings', { activationRules: 'Do NOT activate for simple acknowledgments.' })
+  let count = (await outbound(tess.id)).length
+  await simulate('ok thanks', '15550070', 'Tess')
+  await until(async () => (await logs())[0].kind === 'skipped' && /Activation rules/.test((await logs())[0].output), 'skip logged')
+  assert.equal((await outbound(tess.id)).length, count)
+  await app.ok('PUT', '/ai/settings', { activationRules: '' })
+
+  // Response delay: a teammate who answers inside the window makes the agent stand down, then it snoozes.
+  await app.ok('PUT', '/ai/settings', { responseDelaySeconds: 1, snoozeSeconds: 60 })
+  await simulate('are you there?', '15550070', 'Tess')
+  await app.ok('POST', `/chats/${tess.id}/messages`, { text: 'A human here, I will take this.' })
+  await until(async () => /stood down/.test((await logs())[0].output), 'stand down', 4000)
+  await simulate('great, and the hours?', '15550070', 'Tess')
+  await sleep(1500)
+  assert.equal((await outbound(tess.id)).filter((m: any) => m.sent_by === 'ai').length, count, 'no AI message during delay or snooze')
+  await app.ok('PUT', '/ai/settings', { responseDelaySeconds: 0, snoozeSeconds: 0 })
+  await app.ok('PATCH', `/chats/${tess.id}`, { ai_snooze_until: 0 })
+
+  // Passive mode: the agent drafts into a private note instead of sending. Internal contacts are ignored.
+  await app.ok('PUT', '/ai/settings', { allowSend: false })
+  await simulate('opening hours please', '15550070', 'Tess')
+  await until(async () => (await messages(tess.id)).some((m: any) => m.direction === 'note' && /^Suggested reply/.test(m.text)), 'suggestion note')
+  await app.ok('PUT', '/ai/settings', { allowSend: true })
+  await app.ok('PATCH', `/chats/${tess.id}`, { internal: true })
+  count = llm.calls.length
+  await simulate('internal chatter about hours', '15550070', 'Tess')
+  await sleep(300)
+  assert.equal(llm.calls.length, count)
+
+  // Self-training: a teammate's answer becomes a draft FAQ that needs approval; rerunning learns nothing new.
+  await simulate('Do you deliver on weekends?', '15550071', 'Uma')
+  const uma = await until(() => chatByPhone('15550071'), 'chat')
+  await app.ok('POST', `/chats/${uma.id}/messages`, { text: 'Yes, we deliver on Saturdays.' })
+  const run = await app.ok('POST', '/ai/training/run', {})
+  assert.equal(run.status, 'complete'); assert.equal(run.learned, 1)
+  const learned = (await app.ok('GET', '/faqs')).find((f: any) => f.source === 'learned')
+  assert.equal(learned.status, 'review'); assert.deepEqual(learned.questions, ['Do you deliver on weekends?'])
+  assert.equal((await app.ok('GET', '/knowledge/search?q=deliver weekends saturdays')).filter((h: any) => h.doc_id === learned.id).length, 0)
+  assert.equal((await app.ok('POST', '/ai/training/run', {})).learned, 0)
+  assert.equal((await app.ok('GET', '/ai/training')).length, 2)
+
+  // Workspace assistant uses the same tools as the MCP server.
+  const a = await app.ok('POST', '/assistant', { messages: [{ role: 'user', text: 'who is on the team?' }] })
+  assert.match(a.text, /agent@test\.dev/); assert.equal(a.steps[0].tool, 'list_team')
+
+  // Emoji ticketing: a teammate reacts to a customer message and a ticket is raised from it.
+  await app.ok('POST', '/automations', { name: 'Emoji ticket', trigger: { type: 'message.reaction' }, conditions: [{ field: 'reaction.emoji', op: 'equals', value: '🎫' }, { field: 'reaction.from_team', op: 'is_true' }], actions: [{ type: 'create_ticket', title: '{{message.text}}' }, { type: 'set_property', key: 'last_ticket', value: '#{{ticket.seq}}' }] })
+  const target = (await messages(uma.id)).find((m: any) => m.direction === 'in')
+  await app.ok('POST', `/numbers/${num.id}/simulate-reaction`, { message_id: target.id, emoji: '👍', from_team: true })
+  await app.ok('POST', `/numbers/${num.id}/simulate-reaction`, { message_id: target.id, emoji: '🎫', from_team: true })
+  const t = await until(async () => (await app.ok('GET', `/tickets?chat_id=${uma.id}`))[0], 'ticket from reaction')
+  assert.equal(t.title, 'Do you deliver on weekends?'); assert.equal(t.message_id, target.id)
+  await until(async () => (await app.ok('GET', `/chats/${uma.id}`)).props.last_ticket === `#${t.seq}`, 'property set by automation')
+  assert.equal((await app.ok('GET', `/tickets?chat_id=${uma.id}`)).length, 1)
+
+  // Needs-reply filter, exports, PDF knowledge.
+  await simulate('one more question', '15550071', 'Uma')
+  await until(async () => (await app.ok('GET', '/chats?needs_reply=true')).some((c: any) => c.id === uma.id), 'needs reply')
+  assert.ok(!(await app.ok('GET', '/chats?needs_reply=true')).some((c: any) => c.id === tess.id), 'internal chats are not waiting on us')
+  const csv = await app.ok('GET', '/export/tickets.csv')
+  assert.match(csv.split('\n')[0], /^number,title/); assert.match(csv, /Do you deliver on weekends\?/)
+  assert.equal((await app.req('GET', '/export/nope.csv')).status, 404)
+  const pdf = `%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 53>>stream\nBT /F1 18 Tf 20 100 Td (Warranty lasts two years) Tj ET\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n`
+  const fd = new FormData()
+  fd.append('file', new Blob([pdf], { type: 'application/pdf' }), 'Warranty.pdf')
+  const up = await fetch(`${app.url}/api/v1/knowledge/upload`, { method: 'POST', headers: { cookie: app.cookie }, body: fd })
+  assert.equal(up.status, 200, await up.clone().text())
+  assert.equal((await app.ok('GET', '/knowledge/search?q=warranty'))[0].title, 'Warranty')
+  await app.ok('PUT', '/ai/settings', { personality: 'friendly', restrictions: '' })
+})
+
 test('AI agent (Claude via the Anthropic SDK)', async () => {
   const claude = await anthropicMock()
   mocks.push(claude)
@@ -249,7 +365,7 @@ test('AI agent (Claude via the Anthropic SDK)', async () => {
   const second = claude.calls[1].body.messages
   assert.equal(second.at(-1).content[0].type, 'tool_result'); assert.equal(second.at(-2).content[0].type, 'tool_use')
   assert.match((await app.ok('POST', `/chats/${chat.id}/ai/summary`, {})).text, /^CLAUDE-GEN/)
-  assert.match((await app.ok('POST', '/ai/test', { message: 'refund?' })).text, /^CLAUDE-GEN/)
+  assert.match((await app.ok('POST', '/ai/test', { message: 'refund?' })).text, /^CLAUDE: /)
 })
 
 test('MCP server: auth, tools, and actions over Streamable HTTP', async () => {
