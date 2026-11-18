@@ -1,0 +1,50 @@
+{
+  "name": "switchboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted WhatsApp team inbox, automations, AI agent, API and MCP server",
+  "scripts": {
+    "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite\"",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test:e2e": "playwright test --trace off",
+    "qa": "npm run typecheck && npm test && npm run build && npm run test:e2e"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "baileys": "^7.0.0-rc14",
+    "better-sqlite3": "^13.2.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.3.0",
+    "https-proxy-agent": "^9.1.0",
+    "lucide-react": "^1.74.0",
+    "multer": "^2.5.0",
+    "pino": "^10.4.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^26.6.6",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
