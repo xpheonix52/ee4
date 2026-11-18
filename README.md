@@ -80,6 +80,24 @@ Without Docker: `npm ci && npm run build && npm start` (Node 22+). For developme
   server at `/mcp` (Streamable HTTP). One API key works for both. The in-app **API & MCP** page has
   copy-paste snippets.
 
+## Updates and backups
+
+**Automatic updates.** On the server, run `scripts/install-auto-update.sh` once. Every 5 minutes it checks
+GitHub and, when the branch has new commits, rebuilds and restarts. A failed build rolls back and retries.
+Log: `/var/log/switchboard-update.log`.
+
+**Backups.** A backup is one `.tar.gz` with a consistent copy of the database (chats, automations,
+knowledge, settings, team) and the WhatsApp logins; attachments are optional. One is made every night and
+the last 14 are kept in the data volume (Settings > Backups lists and downloads them). Keep a copy off the
+server too. From any other machine, with an API key:
+
+```bash
+curl -fsS -H "Authorization: Bearer YOUR_API_KEY" http://YOUR_SERVER:3000/api/v1/backups/latest \
+  -o switchboard-$(date +%F).tar.gz        # add ?media=true to include attachments
+```
+
+**Restore** (same server or a new one): `scripts/restore.sh switchboard-2026-01-01.tar.gz`.
+
 ## Using a number safely
 
 This uses the WhatsApp Web protocol (via Baileys), not an official Meta API. WhatsApp can restrict
@@ -93,7 +111,7 @@ after 8 automated messages in a row in one chat, to break bot-to-bot loops.
 npm run qa   # typecheck, backend suite, then a browser bot that drives the real UI
 ```
 
-- `tests/api.test.ts`: 16 scenarios against a real server process, with scripted customers on a sandbox
+- `tests/api.test.ts`: 17 scenarios against a real server process, with scripted customers on a sandbox
   number, mock LLM providers (OpenAI-style and Anthropic), a mock CRM, a webhook receiver and an MCP client.
 - `tests/e2e.test.ts`: 12 browser scenarios (Playwright) from first-run setup to a teammate signing in,
   including a phone-sized viewport and a zero-console-errors check.

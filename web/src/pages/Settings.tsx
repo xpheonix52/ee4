@@ -12,6 +12,8 @@ export default function Settings() {
   const saved = useData('/settings')
   const quick = useData<any[]>('/quick-replies')
   const audit = useData<any[]>(me.role === 'admin' ? '/audit' : null)
+  const backups = useData<any[]>(me.role === 'admin' ? '/backups' : null)
+  const [backing, setBacking] = useState(false)
   const [s, setS] = useState<any>(null)
   const [user, setUser] = useState({ name: '', email: '', password: '', role: 'agent' })
   const [label, setLabel] = useState({ name: '', color: '#2563eb' })
@@ -112,6 +114,23 @@ export default function Settings() {
             <button className="btn btn-outline" disabled={!label.name.trim()} onClick={async () => { if (await run(() => api('POST', '/labels', label))) { setLabel({ ...label, name: '' }); refresh() } }}>Add label</button>
           </div>
         </section>
+
+        {admin && (
+          <section className="card p-5">
+            <h2 className="font-medium">Backups</h2>
+            <p className="text-sm text-slate-500">A backup holds every chat, automation, knowledge entry, setting and WhatsApp login. One is made automatically every night and the last 14 are kept on this server. Download them, or have another computer fetch one on a schedule, so a copy always exists somewhere else.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="btn btn-primary" disabled={backing} onClick={async () => { setBacking(true); await run(() => api('POST', '/backups', {}), 'Backup created'); setBacking(false); backups.reload() }}>{backing ? 'Backing up…' : 'Back up now'}</button>
+              <button className="btn btn-outline" disabled={backing} onClick={async () => { setBacking(true); await run(() => api('POST', '/backups', { media: true }), 'Full backup created'); setBacking(false); backups.reload() }}>Back up now, including attachments</button>
+            </div>
+            <div className="mt-3 divide-y divide-slate-100" data-testid="backups">
+              {backups.data?.map((b) => <div key={b.name} className="flex items-center gap-3 py-1.5 text-sm"><span className="min-w-0 flex-1 truncate font-mono text-xs">{b.name}</span><span className="text-xs text-slate-400">{b.size < 1048576 ? `${Math.max(1, Math.round(b.size / 1024))} KB` : `${(b.size / 1048576).toFixed(1)} MB`} · {dateTime(b.created_at)}</span><a className="btn btn-outline !py-1" href={`/api/v1/backups/${b.name}`}>Download</a></div>)}
+              {backups.data?.length === 0 && <div className="py-2 text-sm text-slate-400">No backups yet. The first automatic one runs tonight.</div>}
+            </div>
+            <p className="mt-3 text-xs text-slate-500">Copy to another computer automatically: create an API key under API & MCP, then schedule this command there (it always fetches a fresh backup):</p>
+            <code className="mt-1 block overflow-x-auto rounded-lg bg-slate-50 p-2 font-mono text-xs whitespace-pre">{`curl -fsS -H "Authorization: Bearer YOUR_API_KEY" ${location.origin}/api/v1/backups/latest -o switchboard-$(date +%F).tar.gz`}</code>
+          </section>
+        )}
 
         {admin && (
           <section className="card p-5">

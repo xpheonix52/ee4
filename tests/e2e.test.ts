@@ -339,6 +339,8 @@ test('broadcast to several chats', async () => {
 
 test('team: add a teammate who can work the inbox but not admin areas', async () => {
   await nav('Settings')
+  await page.getByRole('button', { name: 'Back up now', exact: true }).click()
+  await page.getByTestId('backups').getByText(/switchboard-.*\.tar\.gz/).waitFor()
   await page.getByLabel('Teammate name').fill('Sam Agent')
   await page.getByLabel('Teammate email').fill('sam@acme.test')
   await page.getByLabel('Temporary password').fill('agent-pass-123')

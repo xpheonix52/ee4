@@ -8,6 +8,7 @@ import { getSetting } from './db.js'
 import { aiConfigured, aiShouldFlag } from './ai.js'
 import { maybeAutoReply, snoozeAgent } from './ai.js'
 import { maybeScheduledTraining } from './training.js'
+import { maybeNightlyBackup } from './backup.js'
 
 // ---------- outgoing webhooks ----------
 async function deliver(hook: any, evt: AppEvent) {
@@ -79,6 +80,7 @@ export async function tick() {
     updateChat(c.id, {})
   }
   await runTimedAutomations()
+  maybeNightlyBackup().catch((e) => console.error('[backup] failed', e))
   maybeScheduledTraining().catch((e) => console.error('[training] failed', e))
   const local = localNow()
   const hhmm = local.toISOString().slice(11, 16)

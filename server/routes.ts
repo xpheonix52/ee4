@@ -8,6 +8,7 @@ import * as kb from './knowledge.js'
 import { SandboxTransport } from './wa.js'
 import { agentReply, aiConfig, assistant, generate, aiConfigured, listModels, playground, runModel, PERSONALITIES } from './ai.js'
 import { runTraining } from './training.js'
+import { backupPath, createBackup, listBackups } from './backup.js'
 import { buildContext, executeAutomation, getAutomation, listAutomations, saveAutomation, seedStarterAutomations, TRIGGERS } from './automations.js'
 import { forgetServer, listServerTools } from './mcpClient.js'
 
@@ -519,6 +520,16 @@ api.put('/settings', admin, (req, res) => {
   for (const k of ['workspace', 'businessHours', 'sending', 'flagging'] as const) if (req.body[k] && typeof req.body[k] === 'object') setSetting(k, req.body[k])
   res.json({ workspace: getSetting('workspace'), businessHours: getSetting('businessHours'), sending: getSetting('sending'), flagging: getSetting('flagging') })
 })
+// ---------- backups ----------
+api.get('/backups', admin, (_req, res) => res.json(listBackups()))
+api.post('/backups', admin, async (req, res) => res.json(await createBackup({ media: !!req.body?.media })))
+/** `latest` makes a fresh archive on the spot, so a scheduled download from another machine is always current. */
+api.get('/backups/:name', admin, async (req, res) => {
+  const name = req.params.name === 'latest' ? (await createBackup({ media: req.query.media === 'true' })).name : String(req.params.name)
+  const file = backupPath(name) ?? (() => { throw new HttpError(404, 'No such backup') })()
+  res.download(file, name)
+})
+
 // ---------- exports ----------
 api.get('/export/:kind', (req, res) => {
   const cell = (v: unknown) => { const t = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t }

@@ -600,6 +600,33 @@ test('monitoring: unanswered chats, quiet customers, follow-up reminders, messag
   assert.deepEqual((await app.ok('GET', '/chats?q=Fixed it for you')).map((c: any) => c.id), [vic.id])
 })
 
+test('backups: create, list, download from another machine, and the archive really contains the data', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path')
+  const made = await app.ok('POST', '/backups', {})
+  assert.match(made.name, /^switchboard-.*\.tar\.gz$/); assert.ok(made.size > 1000)
+  assert.equal((await app.ok('GET', '/backups'))[0].name, made.name)
+  // Fetched with an API key, the way a scheduled job on another computer would.
+  const res = await fetch(`${app.url}/api/v1/backups/latest`, { headers: { authorization: `Bearer ${apiKey}` } })
+  assert.equal(res.status, 200)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-restore-'))
+  fs.writeFileSync(path.join(dir, 'b.tar.gz'), Buffer.from(await res.arrayBuffer()))
+  execFileSync('tar', ['-xzf', 'b.tar.gz'], { cwd: dir })
+  const { default: Database } = await import('better-sqlite3')
+  const copy = new Database(path.join(dir, 'switchboard.db'), { readonly: true })
+  assert.equal((copy.prepare('SELECT COUNT(*) n FROM chats').get() as any).n, (await app.ok('GET', '/chats?limit=500')).length)
+  assert.ok((copy.prepare('SELECT COUNT(*) n FROM automations').get() as any).n > 5)
+  assert.equal(copy.pragma('integrity_check', { simple: true }), 'ok')
+  copy.close()
+  const full = await app.ok('POST', '/backups', { media: true })
+  assert.match(execFileSync('tar', ['-tzf', path.join(app.dataDir, 'backups', full.name)]).toString(), /media\//)
+  assert.equal((await app.req('GET', '/backups/..%2Fswitchboard.db')).status, 404)
+  await app.ok('POST', '/users', { name: 'Temp', email: 'temp@test.dev', password: 'password123' })
+  const agent = new App(app.port, app.dataDir)
+  await agent.ok('POST', '/auth/login', { email: 'temp@test.dev', password: 'password123' })
+  assert.equal((await agent.req('GET', '/backups/latest')).status, 403, 'only admins can take the data out')
+})
+
 test('data survives a restart', async () => {
   // A slow broadcast must not hold up a teammate's reply, and whatever is unsent at shutdown is flagged, not lost silently.
   const [x, y] = [await chatByPhone('15550020'), await chatByPhone('15550030')]
