@@ -8,9 +8,9 @@ const EVENTS = ['message.received', 'message.sent', 'message.updated', 'chat.cre
 const ENDPOINTS: [string, string, string][] = [
   ['GET', '/numbers', 'List connected numbers'], ['GET', '/chats?q=&unread=true&assignee=&label=', 'List and filter chats'], ['GET', '/chats/:id/messages', 'Read a chat'],
   ['POST', '/messages', 'Send to a phone: {number_id, to, text}'], ['POST', '/chats/:id/messages', 'Reply in a chat: {text} or a multipart file'], ['POST', '/chats/:id/notes', 'Add a private note'],
-  ['PATCH', '/chats/:id', 'Assign, close, or switch the AI agent: {assignee_id, status, ai_mode}'], ['POST', '/chats/:id/labels', 'Add a label: {label}'],
+  ['PATCH', '/chats/:id', 'Assign, close, set properties, switch the AI agent: {assignee_id, status, ai_mode, props, internal}'], ['POST', '/chats/:id/labels', 'Add a label: {label}'],
   ['GET · POST · PATCH', '/tickets', 'Manage tickets'], ['GET · POST · PUT · DELETE', '/automations', 'Manage automations'], ['POST', '/hooks/:id/:token', 'Trigger a webhook automation (no key needed)'],
-  ['GET · POST', '/knowledge', 'Manage knowledge: {title, content} or {url}'], ['GET', '/knowledge/search?q=', 'Search knowledge'], ['POST', '/scheduled', 'Schedule or broadcast: {chat_ids, text, send_at, repeat}'],
+  ['GET · POST', '/knowledge', 'Manage knowledge: {title, content} or {url}'], ['GET', '/knowledge/search?q=', 'Search knowledge'], ['GET · POST · PUT · DELETE', '/faqs', 'Train the agent: {questions[], answer, instructions}'], ['GET · POST', '/ai/tools', 'Custom HTTP tools for the agent'], ['POST', '/ai/training/run', 'Run self-training now'], ['POST', '/assistant', 'Ask the workspace assistant: {message}'], ['GET', '/export/chats.csv', 'Export chats, tickets or messages'], ['POST', '/scheduled', 'Schedule or broadcast: {chat_ids, text, send_at, repeat}'],
   ['GET', '/events', 'Live event stream (Server-Sent Events)'], ['GET', '/analytics', '7-day stats'],
 ]
 

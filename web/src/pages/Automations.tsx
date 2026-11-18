@@ -5,12 +5,12 @@ import { CopyText, Empty, Field, Modal, Page, Toggle, useAction } from '../ui'
 import { useApp } from '../App'
 
 const TRIGGERS: Record<string, string> = {
-  'message.received': 'A message is received', 'message.sent': 'A teammate sends a message', 'chat.created': 'A new chat starts',
+  'message.received': 'A message is received', 'message.sent': 'A teammate sends a message', 'message.reaction': 'Someone reacts to a message with an emoji', 'chat.created': 'A new chat starts',
   'ticket.created': 'A ticket is created', 'ticket.updated': 'A ticket is updated', webhook: 'Another app calls a webhook', schedule: 'On a schedule',
 }
 const FIELDS: Record<string, string> = {
   'message.text': 'Message text', 'chat.type': 'Chat type (dm or group)', 'chat.name': 'Chat name', 'chat.labels': 'Chat labels', 'contact.phone': 'Contact phone',
-  'number.name': 'Number name', 'chat.assignee_id': 'Assignee', 'time.business_hours': 'Within business hours', 'ticket.status': 'Ticket status', 'ticket.priority': 'Ticket priority',
+  'number.name': 'Number name', 'chat.assignee_id': 'Assignee', 'time.business_hours': 'Within business hours', 'reaction.emoji': 'Reaction emoji', 'reaction.from_team': 'Reaction is from our own number', 'chat.internal': 'Chat is internal', 'ticket.status': 'Ticket status', 'ticket.priority': 'Ticket priority',
 }
 const OPS: Record<string, string> = {
   contains: 'contains any of', not_contains: 'does not contain', equals: 'is exactly', not_equals: 'is not', starts_with: 'starts with', matches: 'matches pattern (regex)',
@@ -26,18 +26,21 @@ const ACTIONS: Record<string, { label: string; fields: FieldDef[] }> = {
   remove_label: { label: 'Remove a label', fields: [{ key: 'label', label: 'Label' }] },
   assign: { label: 'Assign the chat', fields: [{ key: 'user_id', label: 'Assign to', kind: 'user' }] },
   create_ticket: { label: 'Create a ticket', fields: [{ key: 'title', label: 'Title', placeholder: '{{message.text}}' }, { key: 'priority', label: 'Priority', kind: 'select', options: [['medium', 'Medium'], ['low', 'Low'], ['high', 'High'], ['urgent', 'Urgent']] }] },
+  update_ticket: { label: 'Update the ticket', fields: [{ key: 'status', label: 'Status', kind: 'select', options: [['', 'Keep as is'], ['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved']] }, { key: 'priority', label: 'Priority', kind: 'select', options: [['', 'Keep as is'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['urgent', 'Urgent']] }] },
+  set_property: { label: 'Set a chat property', fields: [{ key: 'key', label: 'Property name', placeholder: 'plan' }, { key: 'value', label: 'Value', placeholder: '{{ai.output}}' }] },
   add_note: { label: 'Add a private note', fields: [{ key: 'text', label: 'Note', kind: 'area', placeholder: 'AI says: {{ai.output}}' }] },
   http_request: { label: 'Call another app (HTTP request)', fields: [{ key: 'method', label: 'Method', kind: 'select', options: [['POST', 'POST'], ['GET', 'GET'], ['PUT', 'PUT'], ['PATCH', 'PATCH']] }, { key: 'url', label: 'URL', placeholder: 'https://hooks.example.com/new-lead' }, { key: 'headers', label: 'Headers (JSON, optional)', placeholder: '{"Authorization": "Bearer ..."}' }, { key: 'body', label: 'Body (optional, defaults to the message and chat)', kind: 'area', placeholder: '{"phone": "{{contact.phone}}", "text": "{{message.text}}"}' }] },
   set_ai_mode: { label: 'Turn the AI agent on or off in this chat', fields: [{ key: 'mode', label: 'AI agent', kind: 'select', options: [['off', 'Off'], ['on', 'On'], ['default', 'Follow the number']] }] },
   set_chat_status: { label: 'Close or reopen the chat', fields: [{ key: 'status', label: 'Status', kind: 'select', options: [['closed', 'Closed'], ['open', 'Open']] }] },
   wait: { label: 'Wait', fields: [{ key: 'seconds', label: 'Seconds (max 300)', placeholder: '5' }] },
 }
-const VARIABLES = ['{{message.text}}', '{{contact.name}}', '{{contact.phone}}', '{{chat.name}}', '{{number.name}}', '{{ticket.seq}}', '{{ticket.title}}', '{{ai.output}}', '{{http.body}}', '{{http.json.field}}', '{{webhook.field}}']
+const VARIABLES = ['{{chat.props.name}}', '{{reaction.emoji}}', '{{message.text}}', '{{contact.name}}', '{{contact.phone}}', '{{chat.name}}', '{{number.name}}', '{{ticket.seq}}', '{{ticket.title}}', '{{ai.output}}', '{{http.body}}', '{{http.json.field}}', '{{webhook.field}}']
 
 const TEMPLATES = [
   { icon: '👋', name: 'Welcome new contacts', hint: 'Greets anyone who messages you for the first time.', a: { trigger: { type: 'chat.created' }, conditions: [{ field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'send_message', text: 'Hi {{contact.name}}! Thanks for reaching out. How can we help?' }] } },
   { icon: '🌙', name: 'Away message outside business hours', hint: 'Sends one reply per chat every 8 hours when you are closed.', a: { trigger: { type: 'message.received' }, cooldown_minutes: 480, conditions: [{ field: 'time.business_hours', op: 'is_false' }, { field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'send_message', text: 'Thanks for your message! We are closed right now and will reply when we are back.' }] } },
   { icon: '🎫', name: 'Create tickets from keywords', hint: 'Turns messages about problems into high-priority tickets.', a: { trigger: { type: 'message.received' }, conditions: [{ field: 'message.text', op: 'contains', value: 'urgent, broken, not working, refund, complaint' }], actions: [{ type: 'create_ticket', title: '{{message.text}}', priority: 'high' }, { type: 'add_label', label: 'Issue' }, { type: 'assign' }] } },
+  { icon: '👍', name: 'Emoji ticketing', hint: 'React to any message with 🎫 on your phone to raise a ticket from it.', a: { trigger: { type: 'message.reaction' }, conditions: [{ field: 'reaction.emoji', op: 'equals', value: '🎫' }, { field: 'reaction.from_team', op: 'is_true' }], actions: [{ type: 'create_ticket', title: '{{message.text}}', priority: 'medium' }] } },
   { icon: '🤖', name: 'AI triage and routing', hint: 'AI classifies each message, then labels the chat.', a: { trigger: { type: 'message.received' }, conditions: [{ field: 'chat.type', op: 'equals', value: 'dm' }], actions: [{ type: 'ai_generate', prompt: 'Reply with exactly one word (Sales, Support, Billing or Other) for this message: {{message.text}}' }, { type: 'add_label', label: '{{ai.output}}' }] } },
   { icon: '🔗', name: 'Send new leads to your CRM', hint: 'Posts each new chat to any URL: Zapier, Make, n8n or your own API.', a: { trigger: { type: 'chat.created' }, actions: [{ type: 'http_request', method: 'POST', url: 'https://example.com/your-webhook', body: '{"name": "{{contact.name}}", "phone": "{{contact.phone}}"}' }, { type: 'add_label', label: 'Lead' }] } },
   { icon: '📦', name: 'Notify customers from your system', hint: 'Your app calls a webhook; the customer gets a WhatsApp message.', a: { trigger: { type: 'webhook' }, actions: [{ type: 'send_message', text: 'Your order {{webhook.order}} is on its way!' }] } },
@@ -99,7 +102,7 @@ function Builder({ initial, onClose, onSaved }: { initial: any; onClose: () => v
   const set = (patch: any) => setA((cur: any) => ({ ...cur, ...patch }))
   const setAt = (key: 'conditions' | 'actions', i: number, patch: any) => set({ [key]: a[key].map((x: any, j: number) => (j === i ? { ...x, ...patch } : x)) })
   const move = (i: number, d: number) => { const next = [...a.actions]; [next[i], next[i + d]] = [next[i + d], next[i]]; set({ actions: next }) }
-  const needsChat = !['message.received', 'message.sent', 'chat.created'].includes(a.trigger.type)
+  const needsChat = !['message.received', 'message.sent', 'message.reaction', 'chat.created'].includes(a.trigger.type)
 
   const save = async () => {
     const ok = await run(() => api(a.id ? 'PUT' : 'POST', a.id ? `/automations/${a.id}` : '/automations', { name: a.name, enabled: a.enabled, trigger: a.trigger, conditions: a.conditions, match: a.match, actions: a.actions, cooldown_minutes: Number(a.cooldown_minutes) || 0 }), 'Automation saved')
@@ -145,7 +148,7 @@ function Builder({ initial, onClose, onSaved }: { initial: any; onClose: () => v
           <div className="space-y-2">
             {a.conditions.map((c: any, i: number) => (
               <div key={i} className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 p-2">
-                <select className="input !w-auto flex-1" aria-label="Condition field" value={c.field} onChange={(e) => setAt('conditions', i, { field: e.target.value, ...(e.target.value === 'time.business_hours' ? { op: 'is_true' } : {}) })}>{Object.entries(FIELDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+                <select className="input !w-auto flex-1" aria-label="Condition field" value={c.field} onChange={(e) => setAt('conditions', i, { field: e.target.value, ...(['time.business_hours', 'reaction.from_team', 'chat.internal'].includes(e.target.value) ? { op: 'is_true' } : {}) })}>{Object.entries(FIELDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
                 <select className="input !w-auto" aria-label="Condition operator" value={c.op} onChange={(e) => setAt('conditions', i, { op: e.target.value })}>{Object.entries(OPS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
                 {!NO_VALUE.includes(c.op) && <input className="input !w-auto flex-1" aria-label="Condition value" placeholder={c.op === 'contains' ? 'price, cost, quote' : 'value'} value={c.value || ''} onChange={(e) => setAt('conditions', i, { value: e.target.value })} />}
                 <button className="btn btn-danger !p-1.5" aria-label="Remove condition" onClick={() => set({ conditions: a.conditions.filter((_: any, j: number) => j !== i) })}><Trash2 size={14} /></button>

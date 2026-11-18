@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot, Check, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
+import { ArrowLeft, Bot, Check, Ticket, CheckCheck, Clock, FileText, Paperclip, PanelRight, Search, Send, Sparkles, StickyNote, TriangleAlert, X } from 'lucide-react'
 import { api, clock, timeAgo, useData, useLive } from '../api'
 import { Avatar, Empty, Modal, useAction } from '../ui'
 import { useApp } from '../App'
 
-const TABS = [['all', 'All'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
+const TABS = [['all', 'All'], ['waiting', 'Needs reply'], ['unread', 'Unread'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const
 
 export default function Inbox() {
   const { chatId } = useParams()
@@ -21,6 +21,7 @@ export default function Inbox() {
     if (q) p.set('q', q)
     if (numberId) p.set('number_id', numberId)
     if (tab === 'unread') p.set('unread', 'true')
+    if (tab === 'waiting') p.set('needs_reply', 'true')
     if (tab === 'mine') p.set('assignee', 'me')
     if (tab === 'unassigned') p.set('assignee', 'none')
     return p.toString()
@@ -37,7 +38,7 @@ export default function Inbox() {
             <Search size={15} className="absolute top-2.5 left-2.5 text-slate-400" />
             <input className="input !pl-8" placeholder="Search chats" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search chats" />
           </div>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             {TABS.map(([k, label]) => (
               <button key={k} onClick={() => setTab(k)} className={`cursor-pointer rounded-md px-2 py-1 text-xs font-medium ${tab === k ? 'bg-brand-50 text-brand-800' : 'text-slate-500 hover:bg-slate-100'}`}>{label}</button>
             ))}
@@ -164,7 +165,7 @@ function Conversation({ chatId }: { chatId: string }) {
             return (
               <div key={m.id}>
                 {showDay && <div className="my-3 text-center"><span className="rounded-md bg-white/80 px-2 py-0.5 text-xs text-slate-500">{day === new Date().toDateString() ? 'Today' : day}</span></div>}
-                <Bubble m={m} group={chat.type === 'group'} />
+                <Bubble m={m} group={chat.type === 'group'} onTicket={m.direction === 'in' && m.text ? () => run(() => api('POST', '/tickets', { chat_id: chatId, message_id: m.id, title: m.text.slice(0, 120) }), 'Ticket created from message') : undefined} />
               </div>
             )
           })}
@@ -212,7 +213,7 @@ function Conversation({ chatId }: { chatId: string }) {
   )
 }
 
-function Bubble({ m, group }: { m: any; group: boolean }) {
+function Bubble({ m, group, onTicket }: { m: any; group: boolean; onTicket?: () => void }) {
   if (m.direction === 'note') {
     return (
       <div className="flex justify-center">
@@ -226,7 +227,7 @@ function Bubble({ m, group }: { m: any; group: boolean }) {
   const out = m.direction === 'out'
   const by = !out ? null : m.sent_by === 'ai' ? 'AI agent' : m.sent_by?.startsWith('automation') ? `Automation · ${m.sender_name || ''}` : m.sent_by === 'phone' ? 'Sent from phone' : m.sent_by === 'api' ? 'API' : m.sent_by === 'mcp' ? 'MCP' : /^(broadcast|scheduled)/.test(m.sent_by || '') ? 'Scheduled' : m.sender_name
   return (
-    <div className={`flex ${out ? 'justify-end' : 'justify-start'}`}>
+    <div className={`group flex items-center gap-1 ${out ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[80%] rounded-xl px-3 py-1.5 text-sm shadow-sm sm:max-w-[65%] ${out ? 'rounded-br-sm bg-[#d9fdd3]' : 'rounded-bl-sm bg-white'}`}>
         {!out && group && <div className="text-xs font-medium text-brand-700">{m.sender_name}</div>}
         {by && <div className="flex items-center gap-1 text-xs font-medium text-slate-500">{m.sent_by === 'ai' && <Bot size={11} />}{by}</div>}
@@ -244,6 +245,7 @@ function Bubble({ m, group }: { m: any; group: boolean }) {
             : <CheckCheck size={13} aria-label={m.status === 'read' ? 'Read' : 'Delivered'} className={m.status === 'read' ? 'text-sky-500' : ''} />)}
         </div>
       </div>
+      {onTicket && <button onClick={onTicket} title="Create a ticket from this message" aria-label="Create a ticket from this message" className="cursor-pointer rounded-full bg-white p-1.5 text-slate-500 opacity-0 shadow-sm group-hover:opacity-100 hover:text-brand-700 focus:opacity-100"><Ticket size={14} /></button>}
     </div>
   )
 }
@@ -273,6 +275,8 @@ function Details({ chat, users, me, patch, setChat, aiDefault, onClose }: any) {
   useLive((e, d) => { if (e.startsWith('ticket.') && d.ticket?.chat_id === chat.id) tickets.reload() })
   const [newLabel, setNewLabel] = useState('')
   const [ticketTitle, setTicketTitle] = useState('')
+  const [prop, setProp] = useState({ key: '', value: '' })
+  const setProps = (props: any) => patch({ props })
   const addLabel = async (name: string) => {
     if (!name.trim()) return
     const c = await run(() => api('POST', `/chats/${chat.id}/labels`, { label: name.trim() }))
@@ -313,6 +317,24 @@ function Details({ chat, users, me, patch, setChat, aiDefault, onClose }: any) {
           <button className="btn btn-outline !py-1" onClick={() => addLabel(newLabel)}>Add</button>
         </div>
       </div>
+      <div>
+        <div className="label">Properties</div>
+        <div className="space-y-1">
+          {Object.entries(chat.props || {}).map(([k, v]) => (
+            <div key={k} className="flex items-center gap-1 text-sm"><span className="w-24 shrink-0 truncate text-slate-500" title={k}>{k}</span>
+              <input className="input !py-0.5" aria-label={`Value of ${k}`} defaultValue={v as string} onBlur={(e) => e.target.value !== v && setProps({ ...chat.props, [k]: e.target.value })} />
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 flex gap-1">
+          <input className="input !py-1" placeholder="Name" aria-label="Property name" value={prop.key} onChange={(e) => setProp({ ...prop, key: e.target.value })} />
+          <input className="input !py-1" placeholder="Value" aria-label="Property value" value={prop.value} onChange={(e) => setProp({ ...prop, value: e.target.value })} />
+          <button className="btn btn-outline !py-1" disabled={!prop.key.trim() || !prop.value.trim()} onClick={() => { setProps({ ...chat.props, [prop.key.trim()]: prop.value }); setProp({ key: '', value: '' }) }}>Set</button>
+        </div>
+        <p className="mt-1 text-xs text-slate-400">The AI agent sees these, and automations can use them as {'{{chat.props.name}}'}.</p>
+      </div>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!chat.internal} onChange={(e) => patch({ internal: e.target.checked })} />Internal contact (the AI agent never replies)</label>
+      <a className="block text-xs text-brand-700 underline" href={`/api/v1/export/messages.csv?chat_id=${chat.id}`}>Export this conversation (CSV)</a>
       <div>
         <div className="label">Tickets</div>
         <div className="space-y-1.5">

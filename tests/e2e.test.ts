@@ -141,8 +141,9 @@ test('automations: build one in the UI and watch it answer a customer', async ()
 })
 
 test('knowledge hub and AI agent: configure, try it, then let it answer on WhatsApp', async () => {
+  await app.ok('PUT', '/ai/settings', { responseDelaySeconds: 0, snoozeSeconds: 0 })
   await nav('Knowledge')
-  await page.getByRole('button', { name: 'Add your first document' }).click()
+  await page.getByRole('button', { name: 'Add document' }).click()
   await page.getByLabel('Title').fill('Opening hours')
   await page.getByLabel('Content').fill('We are open Monday to Saturday from 8am to 8pm. We are closed on Sundays.')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
@@ -151,18 +152,53 @@ test('knowledge hub and AI agent: configure, try it, then let it answer on Whats
   await see(/closed on Sundays/)
   await shot('06-knowledge')
 
+  // Train with an FAQ that carries handling instructions.
+  await page.getByRole('tab', { name: /FAQs/ }).click()
+  await page.getByRole('button', { name: 'Add an FAQ' }).click()
+  await page.getByLabel('Customer question').fill('Do you offer refunds?\nmoney back')
+  await page.getByLabel('Answer').fill('Yes, within 30 days of purchase.')
+  await page.getByLabel('Instructions for the agent (optional)').fill('If they are angry, hand off to a human.')
+  await page.getByRole('button', { name: 'Save FAQ' }).click()
+  await page.getByTestId('faq-row').getByText('Do you offer refunds?').waitFor()
+  await see('Has instructions')
+
   await nav('AI Agent')
+  await see('The agent needs a model before it can reply.')
+  await page.getByRole('tab', { name: 'Model' }).click()
   await page.getByRole('button', { name: 'OpenAI-compatible' }).click()
   await page.getByLabel('API key').fill('sk-e2e-test-key')
-  await page.getByLabel('Model').fill('mock-model')
+  await page.getByLabel('Model', { exact: true }).fill('mock-model')
   await page.getByLabel('Base URL').fill(`${llm.url}/v1`)
-  await page.getByLabel('Agent name').fill('Sunny')
   await page.getByRole('button', { name: 'Save settings' }).click()
   await see('AI agent settings saved')
+
+  await page.getByRole('tab', { name: 'Persona' }).click()
+  await page.getByLabel('Agent name').fill('Sunny')
+  await page.getByRole('button', { name: /Spartan/ }).click()
+  await page.getByLabel('Restrictions').fill('Never promise delivery dates.')
+  await page.getByRole('button', { name: 'Save settings' }).click()
+  await see('AI agent settings saved')
+  await shot('07-agent-persona')
   await page.getByLabel('Test message').fill('When are you open?')
-  await page.getByRole('button', { name: 'Ask' }).click()
-  await see(/GEN:/)
+  await page.getByRole('button', { name: 'Ask', exact: true }).click()
+  await see(/ANSWER:/)
+  await see('Did: search knowledge')
   await see('Used: Opening hours')
+  const sys = llm.calls.at(-1).body.messages[0].content
+  assert.match(sys, /Your name is Sunny/); assert.match(sys, /ultra-brief/); assert.match(sys, /Never promise delivery dates\./)
+
+  // A custom HTTP tool, created in the UI.
+  await page.getByRole('tab', { name: 'Tools' }).click()
+  await page.getByRole('button', { name: 'Add tool' }).click()
+  await page.getByLabel('Tool name').fill('Get Order Status')
+  await page.getByLabel('When should the AI use it?').fill('Look up an order by id')
+  await page.getByRole('dialog').getByLabel('URL').fill(`${llm.url}/orders/{order_id}`)
+  await page.getByRole('button', { name: 'Add parameter' }).click()
+  await page.getByLabel('Parameter name').fill('order_id')
+  await page.getByRole('button', { name: 'Save tool' }).click()
+  await page.getByTestId('tool-row').getByText('get_order_status').waitFor()
+
+  await page.getByRole('tab', { name: 'When it replies' }).click()
   await page.getByRole('switch', { name: 'AI agent on Demo line' }).click()
   await shot('07-agent')
 
@@ -181,6 +217,39 @@ test('knowledge hub and AI agent: configure, try it, then let it answer on Whats
   await page.getByRole('button', { name: 'AI draft' }).click()
   await page.waitForFunction(() => /ANSWER/.test((document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement)?.value || ''))
   await shot('08-inbox-ai')
+})
+
+test('self-training learns from a teammate, and the assistant works across the workspace', async () => {
+  await nav('AI Agent')
+  await page.getByRole('tab', { name: 'Training' }).click()
+  await page.getByRole('button', { name: 'Run training now' }).click()
+  await page.getByRole('cell', { name: 'Complete' }).first().waitFor()
+  await page.getByRole('tab', { name: 'Logs' }).click()
+  await see('Replied')
+  await see(/search_knowledge/)
+  await shot('12-agent-logs')
+
+  await nav('Assistant')
+  await page.getByLabel('Ask the assistant').fill('who is on the team?')
+  await page.getByRole('button', { name: 'Send to assistant' }).click()
+  await see(/olivia@acme\.test/)
+  await see(/Used 1 tool call: list team/)
+  await shot('13-assistant')
+
+  // Inbox extras: needs-reply filter, custom properties, ticket straight from a message.
+  await customer('Is my warranty still valid?', '15557004', 'Quinn')
+  await nav('Inbox')
+  await page.getByRole('button', { name: 'Needs reply' }).click()
+  await page.getByTestId('chat-list').getByText('Quinn', { exact: true }).click()
+  await page.getByLabel('Property name').fill('plan')
+  await page.getByLabel('Property value').fill('Gold')
+  await page.getByRole('button', { name: 'Set', exact: true }).click()
+  await page.getByLabel('Value of plan').waitFor()
+  const bubble = page.getByTestId('messages').getByText('Is my warranty still valid?')
+  await bubble.hover()
+  await page.getByRole('button', { name: 'Create a ticket from this message' }).first().click()
+  await see(/#\d+ Is my warranty still valid\?/)
+  await page.getByRole('button', { name: 'All', exact: true }).click()
 })
 
 test('API & MCP: create a key in the UI and use it from an MCP client', async () => {
@@ -252,7 +321,7 @@ test('team: add a teammate who can work the inbox but not admin areas', async ()
 
 test('works on a phone-sized screen without sideways scrolling', async () => {
   await page.setViewportSize({ width: 390, height: 800 })
-  for (const path of ['/', '/inbox', '/automations', '/agent', '/tickets', '/settings', '/knowledge', '/broadcasts', '/numbers']) {
+  for (const path of ['/', '/inbox', '/automations', '/agent', '/assistant', '/tickets', '/settings', '/knowledge', '/broadcasts', '/numbers']) {
     await page.goto(app.url + path)
     await page.waitForLoadState('networkidle')
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)

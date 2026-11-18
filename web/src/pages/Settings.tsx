@@ -90,6 +90,14 @@ export default function Settings() {
         </section>
 
         <section className="card p-5">
+          <h2 className="font-medium">Export data</h2>
+          <p className="text-sm text-slate-500">Download CSV files to analyze elsewhere or keep as a backup.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {[['chats.csv', 'Chats'], ['tickets.csv', 'Tickets'], ['messages.csv', 'Messages (latest 20,000)']].map(([f, label]) => <a key={f} className="btn btn-outline" href={`/api/v1/export/${f}`}>{label}</a>)}
+          </div>
+        </section>
+
+        <section className="card p-5">
           <h2 className="font-medium">Quick replies</h2>
           <p className="text-sm text-slate-500">Type / in the message box to insert one.</p>
           <div className="mt-2 divide-y divide-slate-100">
