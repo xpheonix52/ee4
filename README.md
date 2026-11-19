@@ -16,8 +16,12 @@ Open `http://<your-server>:3000`, create the admin account, then follow the chec
 Everything (database, WhatsApp logins, media) is stored in the `switchboard-data` volume, so upgrades are
 `git pull && docker compose up -d --build`.
 
-The server must stay on: a WhatsApp link is a live connection. Put it behind HTTPS (Caddy, nginx,
-Cloudflare Tunnel) and then set `COOKIE_SECURE=true` and `TRUST_PROXY=1` in `docker-compose.yml`.
+The server must stay on: a WhatsApp link is a live connection.
+
+**HTTPS.** Run `scripts/enable-https.sh` on the server. With no argument it uses a free name for the
+server's IP (for example `https://72-60-194-113.sslip.io`); pass your own domain once its DNS points at the
+server (`scripts/enable-https.sh chat.example.com`). Caddy fetches and renews the certificate, and the app
+stops being reachable over plain HTTP. Ports 80 and 443 must be open.
 
 **Hosted option:** `render.yaml` is a Render blueprint (New > Blueprint > this repo) that builds the
 Dockerfile and attaches a persistent disk. Any host that runs a Docker container with a volume works

@@ -3,14 +3,13 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # With HTTPS enabled (scripts/enable-https.sh) the app is only reachable through the HTTPS proxy.
+      - "${APP_BIND:-0.0.0.0}:3000:3000"
     volumes:
-      - switchboard-data:/data   # database, WhatsApp logins and media live here
+      - switchboard-data:/data   # database, WhatsApp logins, media and backups live here
     environment:
-      # Set to "true" once the app is served over HTTPS (behind Caddy, nginx, Cloudflare, etc.)
-      COOKIE_SECURE: "false"
-      # Set to "1" when a reverse proxy sits in front, so the real visitor IP is used for login throttling
-      TRUST_PROXY: "0"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      TRUST_PROXY: "${TRUST_PROXY:-0}"
 
 volumes:
   switchboard-data:

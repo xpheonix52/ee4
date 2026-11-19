@@ -502,15 +502,31 @@ api.get('/webhooks/:id/deliveries', admin, (req, res) => res.json(db.prepare('SE
 // ---------- scheduled messages & broadcasts ----------
 const schedView = (s: any) => ({ ...s, chat_ids: JSON.parse(s.chat_ids) })
 api.get('/scheduled', (_req, res) => res.json((db.prepare('SELECT * FROM scheduled ORDER BY send_at DESC LIMIT 200').all() as any[]).map(schedView)))
-api.post('/scheduled', (req, res) => {
+api.post('/scheduled', async (req, res) => {
   const chatIds: string[] = Array.isArray(req.body.chat_ids) ? req.body.chat_ids.filter((c: any) => core.getChat(String(c))) : []
-  if (!chatIds.length) bad('Pick at least one chat')
+  // Typed or pasted numbers: one per entry, optionally "number, name". Each becomes a chat on the chosen sending number.
+  const skipped: { phone: string; reason: string }[] = []
+  const entries: string[] = (Array.isArray(req.body.phones) ? req.body.phones : []).map((x: any) => String(x).trim()).filter(Boolean).slice(0, 1000)
+  if (entries.length) {
+    const numberId = str(req.body.number_id, 'Choose which number to send from')
+    need(core.getNumber(numberId), 'That sending number no longer exists')
+    for (const entry of entries) {
+      const [rawPhone, ...rest] = entry.split(/[,;\t]/)
+      const digits = rawPhone.replace(/\D/g, '')
+      if (digits.length < 7 || digits.length > 15) { skipped.push({ phone: rawPhone.trim(), reason: 'Not a valid phone number. Include the country code.' }); continue }
+      try {
+        const chat = await core.chatForPhone(numberId, digits, rest.join(' ').trim() || undefined)
+        if (!chatIds.includes(chat.id)) chatIds.push(chat.id)
+      } catch (e: any) { skipped.push({ phone: rawPhone.trim(), reason: String(e?.message || e) }) }
+    }
+  }
+  if (!chatIds.length) bad(skipped.length ? `None of the numbers could be used. ${skipped[0].phone}: ${skipped[0].reason}` : 'Pick at least one chat or enter a phone number')
   const sendAt = req.body.send_at ? Number(new Date(req.body.send_at)) : now()
   if (!Number.isFinite(sendAt)) bad('send_at is not a valid date')
   const s = { id: id('sch'), repeat: ['daily', 'weekly'].includes(req.body.repeat) ? req.body.repeat : 'none' }
   db.prepare('INSERT INTO scheduled(id, name, chat_ids, text, send_at, repeat, created_by, created_at) VALUES(?,?,?,?,?,?,?,?)')
     .run(s.id, req.body.name || null, JSON.stringify(chatIds), str(req.body.text, 'Message'), sendAt, s.repeat, req.actor!.name, now())
-  res.json(schedView(db.prepare('SELECT * FROM scheduled WHERE id = ?').get(s.id)))
+  res.json({ ...schedView(db.prepare('SELECT * FROM scheduled WHERE id = ?').get(s.id)), skipped })
 })
 api.delete('/scheduled/:id', (req, res) => { db.prepare('DELETE FROM scheduled WHERE id = ?').run(req.params.id); res.json({ ok: true }) })
 

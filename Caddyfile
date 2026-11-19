@@ -1,0 +1,4 @@
+# Caddy gets and renews a free certificate for this name automatically.
+{$DOMAIN} {
+	reverse_proxy switchboard:3000
+}

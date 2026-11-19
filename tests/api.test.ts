@@ -450,6 +450,17 @@ test('scheduled messages, broadcasts and the daily limit', async () => {
   assert.match(results.find((m: any) => m.status === 'failed').error, /Daily broadcast limit/)
   assert.equal((await app.req('POST', '/scheduled', { chat_ids: [], text: 'x' })).status, 400)
 
+  // Recipients can also be typed or pasted as phone numbers, with an optional name; bad ones are reported, not sent.
+  await app.ok('PUT', '/settings', { sending: { broadcastDailyLimit: 1000 } })
+  const typed = await app.ok('POST', '/scheduled', { number_id: num.id, phones: ['+1 555-0090, Zed Typed', '15550091', '123', a.phone], text: 'Hello {{contact.name}}' })
+  assert.equal(typed.chat_ids.length, 3); assert.deepEqual(typed.skipped.map((x: any) => x.phone), ['123'])
+  const zed = await until(() => chatByPhone('15550090'), 'chat created from a typed number')
+  assert.equal(zed.name, 'Zed Typed')
+  await until(async () => (await outbound(zed.id)).some((m: any) => m.text === 'Hello Zed Typed'), 'typed-number broadcast')
+  assert.ok(typed.chat_ids.includes(a.id), 'a number that already has a chat reuses it')
+  assert.equal((await app.req('POST', '/scheduled', { phones: ['15550092'], text: 'x' })).status, 400, 'needs a sending number')
+  assert.equal((await app.req('POST', '/scheduled', { number_id: num.id, phones: ['12'], text: 'x' })).status, 400)
+
   const later = await app.ok('POST', '/scheduled', { chat_ids: [a.id], text: 'Later', send_at: new Date(Date.now() + 3600_000).toISOString(), repeat: 'daily' })
   await sleep(500)
   assert.equal((await app.ok('GET', '/scheduled')).find((x: any) => x.id === later.id).status, 'pending')
